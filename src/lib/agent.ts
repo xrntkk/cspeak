@@ -76,7 +76,7 @@ export async function executeClientTool(
     // --- Market analysis tools -------------------------------------------
 
     case "getMarketIndex": {
-      const idx = await marketBroadIndex();
+      const idx = await marketBroadIndex(accessToken);
       return {
         index: +idx.index.toFixed(2),
         diffYesterday: +idx.diffYesterday.toFixed(2),
@@ -103,7 +103,7 @@ export async function executeClientTool(
     }
 
     case "getHotList": {
-      const page = await marketList(1, 50, "");
+      const page = await marketList(accessToken);
       const items = page.list.map((it) => {
         const valid = it.prices
           .filter((p) => p.sellPrice > 0)
@@ -132,7 +132,7 @@ export async function executeClientTool(
     case "getItemPrice": {
       const mhn = String(args.marketHashName ?? "");
       if (!mhn) return { error: "marketHashName is required" };
-      const prices = await marketPriceSingle(mhn);
+      const prices = await marketPriceSingle(accessToken, mhn);
       return {
         marketHashName: mhn,
         prices: prices
@@ -152,7 +152,7 @@ export async function executeClientTool(
       const platform = String(args.platform ?? "YOUPIN");
       const klineType = String(args.klineType ?? "1");
       if (!mhn) return { error: "marketHashName is required" };
-      const candles = await marketItemKline(mhn, platform, klineType);
+      const candles = await marketItemKline(accessToken, mhn, platform, klineType);
       const recent = candles.slice(-30);
       if (recent.length === 0) return { platform, klineType, candles: [], summary: null };
       const first = recent[0];

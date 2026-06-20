@@ -1,16 +1,37 @@
 use serde::Serialize;
 
-/// All market data now flows through the Cloudflare Worker, which proxies
-/// SteamDT and caches responses at the edge. The desktop client only needs
-/// the Worker URL and an optional access token.
 const WORKER: &str = "https://csspeak-market.xrntkk.top";
 
-fn client() -> reqwest::Client {
-    reqwest::Client::new()
+fn bearer(token: Option<&str>) -> String {
+    format!("Bearer {}", token.unwrap_or(""))
 }
 
-fn bearer(token: Option<&str>) -> Option<String> {
-    token.map(|t| format!("Bearer {t}"))
+/// Build a GET URL with the given path and query pairs (both keys and values
+/// are percent-encoded).
+fn build_url(path: &str, pairs: &[(&str, &str)]) -> String {
+    let mut u = format!("{WORKER}{path}");
+    if !pairs.is_empty() {
+        u.push('?');
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            if i > 0 { u.push('&'); }
+            u.push_str(&pct(k));
+            u.push('=');
+            u.push_str(&pct(v));
+        }
+    }
+    u
+}
+
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' =>
+                out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 #[derive(Serialize)]
@@ -23,20 +44,16 @@ pub struct PlatformPrice {
     pub update_time: i64,
 }
 
-/// /price?marketHashName=
 pub async fn price_single(
     access_token: Option<&str>,
     market_hash_name: &str,
 ) -> anyhow::Result<Vec<PlatformPrice>> {
-    let resp: serde_json::Value = client()
-        .get(format!("{WORKER}/price"))
-        .bearer_auth(bearer(access_token))
-        .query(&[("marketHashName", market_hash_name)])
-        .send()
-        .await?
-        .json()
-        .await?;
-    parse_prices(resp.get("data"))
+    let url = build_url("/price", &[("marketHashName", market_hash_name)]);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", bearer(access_token))
+        .send().await?.json::<serde_json::Value>().await?;
+    Ok(parse_prices(resp.get("data")))
 }
 
 #[derive(Serialize)]
@@ -48,25 +65,21 @@ pub struct Candle {
     pub low: f64,
 }
 
-/// /kline?marketHashName=&platform=&type=
 pub async fn item_kline(
     access_token: Option<&str>,
     market_hash_name: &str,
     platform: &str,
     kline_type: &str,
 ) -> anyhow::Result<Vec<Candle>> {
-    let resp: serde_json::Value = client()
-        .get(format!("{WORKER}/kline"))
-        .bearer_auth(bearer(access_token))
-        .query(&[
-            ("marketHashName", market_hash_name),
-            ("platform", platform),
-            ("type", kline_type),
-        ])
-        .send()
-        .await?
-        .json()
-        .await?;
+    let url = build_url("/kline", &[
+        ("marketHashName", market_hash_name),
+        ("platform", platform),
+        ("type", kline_type),
+    ]);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", bearer(access_token))
+        .send().await?.json::<serde_json::Value>().await?;
     Ok(parse_candles(resp.get("data")))
 }
 
@@ -79,35 +92,24 @@ pub struct BroadIndex {
     pub history: Vec<(i64, f64)>,
 }
 
-/// /trend
 pub async fn broad_index(
     access_token: Option<&str>,
 ) -> anyhow::Result<BroadIndex> {
-    let resp: serde_json::Value = client()
-        .get(format!("{WORKER}/trend"))
-        .bearer_auth(bearer(access_token))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let url = build_url("/trend", &[]);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", bearer(access_token))
+        .send().await?.json::<serde_json::Value>().await?;
     let d = resp.get("data").cloned().unwrap_or_default();
     if d.get("broadMarketIndex").is_none() {
-        anyhow::bail!(
-            "broad index unavailable: {}",
-            resp.get("errorMsg").and_then(|v| v.as_str()).unwrap_or("no data"),
-        );
+        anyhow::bail!("broad index unavailable");
     }
-    let history = d
-        .get("historyMarketIndexList")
+    let history = d.get("historyMarketIndexList")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|row| {
-                    let r = row.as_array()?;
-                    Some((as_i64(r.get(0)?), num(r.get(1)?)?))
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|row| {
+            let r = row.as_array()?;
+            Some((as_i64(r.get(0)?), num(r.get(1)?)?))
+        }).collect())
         .unwrap_or_default();
     Ok(BroadIndex {
         index: d.get("broadMarketIndex").and_then(num).unwrap_or(0.0),
@@ -136,40 +138,30 @@ pub struct MarketListPage {
     pub next_id: String,
 }
 
-/// /hotlist  (from the public web API, proxied through the Worker with
-///          10 min edge cache — no daily limit, suitable for all users.)
 pub async fn market_list(
     access_token: Option<&str>,
 ) -> anyhow::Result<MarketListPage> {
-    let resp: serde_json::Value = client()
-        .get(format!("{WORKER}/hotlist"))
-        .bearer_auth(bearer(access_token))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let url = build_url("/hotlist", &[]);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", bearer(access_token))
+        .send().await?.json::<serde_json::Value>().await?;
 
-    let next = resp
-        .pointer("/nextId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let next = resp.pointer("/nextId").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut out = Vec::new();
     if let Some(arr) = resp.pointer("/data/list").and_then(|v| v.as_array()) {
         for it in arr {
-            let prices = it
-                .get("sellingPriceList")
+            let prices = it.get("sellingPriceList")
                 .and_then(|v| v.as_array())
                 .map(|ps| ps.iter().map(parse_price).collect())
                 .unwrap_or_default();
             out.push(MarketListItem {
-                item_id: it.get("itemId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                name: it.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                short_name: it.get("marketShortName").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                market_hash_name: it.get("marketHashName").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                image_url: it.get("imageUrl").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                rarity_color: it.get("rarityColor").and_then(|v| v.as_str()).unwrap_or("#888").to_string(),
-                exterior_name: it.get("exteriorName").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                item_id: s(it, "itemId"),          name: s(it, "name"),
+                short_name: s(it, "marketShortName"),
+                market_hash_name: s(it, "marketHashName"),
+                image_url: s(it, "imageUrl"),
+                rarity_color: s_or(it, "rarityColor", "#888"),
+                exterior_name: s(it, "exteriorName"),
                 prices,
             });
         }
@@ -177,7 +169,12 @@ pub async fn market_list(
     Ok(MarketListPage { list: out, next_id: next })
 }
 
-// ---- helpers ----
+fn s(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+fn s_or(v: &serde_json::Value, key: &str, fallback: &str) -> String {
+    v.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| fallback.to_string())
+}
 
 fn parse_prices(data: Option<&serde_json::Value>) -> Vec<PlatformPrice> {
     let Some(arr) = data.and_then(|d| d.as_array()) else { return Vec::new(); };
@@ -186,29 +183,23 @@ fn parse_prices(data: Option<&serde_json::Value>) -> Vec<PlatformPrice> {
 
 fn parse_price(p: &serde_json::Value) -> PlatformPrice {
     PlatformPrice {
-        platform: p.get("platformName").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        platform: s(p, "platformName"),
         sell_price: p.get("price").and_then(num).unwrap_or(0.0),
-        sell_count: 0,
-        bidding_price: 0.0,
-        bidding_count: 0,
+        sell_count: 0, bidding_price: 0.0, bidding_count: 0,
         update_time: p.get("lastUpdate").and_then(|v| v.as_i64()).unwrap_or(0),
     }
 }
 
 fn parse_candles(data: Option<&serde_json::Value>) -> Vec<Candle> {
     let Some(arr) = data.and_then(|d| d.as_array()) else { return Vec::new(); };
-    arr.iter()
-        .filter_map(|row| {
-            let r = row.as_array()?;
-            Some(Candle {
-                time: as_i64(r.get(0)?),
-                open: num(r.get(1)?)?,
-                close: num(r.get(2)?)?,
-                high: num(r.get(3)?)?,
-                low: num(r.get(4)?)?,
-            })
+    arr.iter().filter_map(|row| {
+        let r = row.as_array()?;
+        Some(Candle {
+            time: as_i64(r.get(0)?), open: num(r.get(1)?)?,
+            close: num(r.get(2)?)?,  high: num(r.get(3)?)?,
+            low: num(r.get(4)?)?,
         })
-        .collect()
+    }).collect()
 }
 
 fn num(v: &serde_json::Value) -> Option<f64> {
