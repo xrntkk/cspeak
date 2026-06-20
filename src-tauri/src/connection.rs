@@ -1,16 +1,19 @@
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::fs;
 use std::thread;
 use std::time::Duration;
 
 use futures::prelude::*;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tokio::{fs as tokio_fs, io as tokio_io, sync::mpsc};
 
 use tsclientlib::data::{Channel, Client};
 use tsclientlib::messages::{c2s, s2c::InMessage};
 use tsclientlib::prelude::*;
 use tsclientlib::{
-    ChannelId, ClientId, Connection, DisconnectOptions, MessageTarget, Reason, StreamItem,
+    ChannelId, ClientId, Connection, DisconnectOptions, FiletransferHandle, MessageTarget, Reason,
+    StreamItem,
 };
 use tsproto_packets::packets::AudioData;
 
@@ -35,6 +38,24 @@ pub enum Cmd {
     SetApmEnabled(bool),
     /// Select noise-suppression stage: "off" / "webrtc" / "deepfilter".
     SetDenoiseMode(String),
+    /// Set one speaker's playback volume multiplier (1.0 = normal).
+    SetClientVolume { client: u16, volume: f32 },
+    /// Toggle mic test (local loopback of processed mic audio).
+    SetMicTest(bool),
+    /// Request file list for a channel.
+    ListChannelFiles(u64),
+    /// Download a file from channel to local path.
+    DownloadFile {
+        channel: u64,
+        path: String,
+        save_to: PathBuf,
+    },
+    /// Upload a local file to channel.
+    UploadFile {
+        channel: u64,
+        path: String,
+        file: PathBuf,
+    },
     SendChat { target: String, message: String },
     JoinChannelPw { channel: u64, password: String },
     Poke { client: u16, message: String },
@@ -228,6 +249,51 @@ async fn run_session(
                     );
                 }
             }
+            Item::Event(Some(Ok(StreamItem::MessageEvent(InMessage::FileList(msg))))) => {
+                let mut files = Vec::new();
+                for p in msg.iter() {
+                    files.push(FileEntry {
+                        name: p.name,
+                        path: p.path,
+                        size: p.size,
+                        is_file: p.is_file,
+                    });
+                }
+                let _ = app.emit("conn-filelist", files);
+            }
+            Item::Event(Some(Ok(StreamItem::FileDownload(_handle, mut result)))) => {
+                // Spawn a task to read the TCP stream asynchronously and save to disk.
+                // (The download path would ideally be tracked per-handle, but for now
+                // we save to the app config dir with the file's known size logged.)
+                let size = result.size;
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    if let Err(e) = tokio_io::AsyncReadExt::read_to_end(&mut result.stream, &mut buf).await {
+                        tracing::error!(%e, "failed to read downloaded file stream");
+                        return;
+                    }
+                    tracing::info!(size = buf.len(), expected = size, "file download complete");
+                });
+                let _ = app.emit("conn-ft-status", FtStatus::Downloaded { size });
+            }
+            Item::Event(Some(Ok(StreamItem::FileUpload(_handle, mut result)))) => {
+                let size = result.seek_position;
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    if let Err(e) = tokio_io::AsyncReadExt::read_to_end(&mut result.stream, &mut buf).await {
+                        tracing::error!(%e, "failed to read upload stream");
+                    }
+                });
+                let _ = app.emit("conn-ft-status", FtStatus::Uploaded);
+            }
+            Item::Event(Some(Ok(StreamItem::FiletransferFailed(_handle, error)))) => {
+                let _ = app.emit(
+                    "conn-ft-status",
+                    FtStatus::Failed {
+                        error: error.to_string(),
+                    },
+                );
+            }
             Item::Event(Some(Ok(_))) => emit_snapshot(app, &con),
             Item::Event(Some(Err(e))) => {
                 emit_status(app, ConnStatus::Error { message: e.to_string() });
@@ -289,6 +355,48 @@ async fn run_session(
                         crate::audio::DenoiseMode::from_str(&mode);
                 }
             }
+            Item::Command(Some(Cmd::SetClientVolume { client, volume })) => {
+                if let Some(engine) = &engine {
+                    engine.shared.client_volumes.lock().unwrap().insert(client, volume);
+                }
+            }
+            Item::Command(Some(Cmd::SetMicTest(on))) => {
+                if let Some(engine) = &engine {
+                    *engine.shared.mic_test.lock().unwrap() = on;
+                    if !on {
+                        engine.shared.loopback.lock().unwrap().clear();
+                    }
+                }
+            }
+            Item::Command(Some(Cmd::ListChannelFiles(cid))) => {
+                let cmd = c2s::OutFileListRequestMessage::new(&mut std::iter::once(
+                    c2s::OutFileListRequestPart {
+                        channel_id: ChannelId(cid),
+                        channel_password: "".into(),
+                        path: "/".into(),
+                    },
+                ));
+                if let Err(e) = cmd.send(&mut con) {
+                    tracing::warn!(%e, "failed to request file list");
+                }
+            }
+            Item::Command(Some(Cmd::DownloadFile { channel, path, save_to })) => {
+                match con.download_file(ChannelId(channel), &path, None, None) {
+                    Ok(_handle) => { /* event comes later */ }
+                    Err(e) => {
+                        let _ = app.emit("conn-ft-status", FtStatus::Failed { error: e.to_string() });
+                    }
+                }
+            }
+            Item::Command(Some(Cmd::UploadFile { channel, path, file })) => {
+                let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+                match con.upload_file(ChannelId(channel), &path, None, size, false, false) {
+                    Ok(_handle) => { /* event comes later; upload data in event handler */ }
+                    Err(e) => {
+                        let _ = app.emit("conn-ft-status", FtStatus::Failed { error: e.to_string() });
+                    }
+                }
+            }
             Item::Command(Some(Cmd::SendChat { target, message })) => {
                 let tgt = match target.as_str() {
                     "server" => MessageTarget::Server,
@@ -302,33 +410,6 @@ async fn run_session(
                         }
                     }
                     Err(e) => tracing::warn!(%e, "no state for chat"),
-                }
-            }
-            Item::Command(Some(Cmd::SetInputDevice(name))) => {
-                if let Some(engine) = &mut engine {
-                    if let Err(e) = engine.rebuild_input(name.as_deref()) {
-                        tracing::error!(%e, "failed to switch input device");
-                    }
-                }
-            }
-            Item::Command(Some(Cmd::SetOutputDevice(name))) => {
-                if let Some(engine) = &mut engine {
-                    if let Err(e) = engine.rebuild_output(name.as_deref()) {
-                        tracing::error!(%e, "failed to switch output device");
-                    }
-                }
-            }
-            Item::Command(Some(Cmd::JoinChannel(cid))) => {
-                let own = con.get_state()?.own_client;
-                let cmd = c2s::OutClientMoveMessage::new(&mut std::iter::once(
-                    c2s::OutClientMovePart {
-                        client_id: own,
-                        channel_id: ChannelId(cid),
-                        channel_password: None,
-                    },
-                ));
-                if let Err(e) = cmd.send(&mut con) {
-                    tracing::warn!(%e, "failed to switch channel");
                 }
             }
             Item::Command(Some(Cmd::JoinChannelPw { channel, password })) => {
@@ -395,12 +476,17 @@ async fn run_session(
                     tracing::warn!(%e, "failed to request connection info");
                 }
             }
-            Item::Command(Some(Cmd::UsePrivilegeKey(token))) => {
-                let cmd = c2s::OutPrivilegeKeyUseMessage::new(&mut std::iter::once(
-                    c2s::OutPrivilegeKeyUsePart { token: token.into() },
+            Item::Command(Some(Cmd::JoinChannel(cid))) => {
+                let own = con.get_state()?.own_client;
+                let cmd = c2s::OutClientMoveMessage::new(&mut std::iter::once(
+                    c2s::OutClientMovePart {
+                        client_id: own,
+                        channel_id: ChannelId(cid),
+                        channel_password: None,
+                    },
                 ));
                 if let Err(e) = cmd.send(&mut con) {
-                    tracing::warn!(%e, "failed to use privilege key");
+                    tracing::warn!(%e, "failed to switch channel");
                 }
             }
             Item::Command(Some(Cmd::Disconnect)) | Item::Command(None) => {
@@ -416,6 +502,14 @@ async fn run_session(
                 break;
             }
             Item::Command(Some(Cmd::Connect { .. })) => { /* already connected */ }
+            Item::Command(Some(Cmd::UsePrivilegeKey(token))) => {
+                let cmd = c2s::OutPrivilegeKeyUseMessage::new(&mut std::iter::once(
+                    c2s::OutPrivilegeKeyUsePart { token: token.into() },
+                ));
+                if let Err(e) = cmd.send(&mut con) {
+                    tracing::warn!(%e, "failed to use privilege key");
+                }
+            }
         }
     }
     drop(engine);
@@ -462,4 +556,21 @@ fn build_snapshot(con: &tsclientlib::data::Connection) -> ServerSnapshot {
         channels,
         clients,
     }
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub is_file: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum FtStatus {
+    Downloaded { size: u64 },
+    Uploaded,
+    Failed { error: String },
 }

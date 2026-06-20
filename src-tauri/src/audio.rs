@@ -215,6 +215,14 @@ pub struct Shared {
     pub apm: Option<Arc<Apm>>,
     /// Selected noise-suppression stage (Off / WebRTC / DeepFilter).
     pub denoise_mode: Arc<Mutex<DenoiseMode>>,
+    /// Per-speaker playback volume multipliers (client id → gain). Missing =
+    /// 1.0. Applied to each talker's queue before mixing.
+    pub client_volumes: Arc<Mutex<std::collections::HashMap<u16, f32>>>,
+    /// Mic-test mode: loop captured (processed) audio back to the local speaker
+    /// instead of sending it. Lets the user hear their own mic + denoise.
+    pub mic_test: Arc<Mutex<bool>>,
+    /// Ring of mono 48 kHz samples staged for loopback playback during mic test.
+    pub loopback: Arc<Mutex<std::collections::VecDeque<f32>>>,
 }
 
 impl Shared {
@@ -238,6 +246,9 @@ impl Shared {
             ptt_active: Arc::new(Mutex::new(false)),
             apm,
             denoise_mode: Arc::new(Mutex::new(DenoiseMode::Webrtc)),
+            client_volumes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            mic_test: Arc::new(Mutex::new(false)),
+            loopback: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
 }
@@ -351,7 +362,9 @@ fn build_output(
     let channels = cfg.channels() as usize;
     let config: cpal::StreamConfig = cfg.into();
 
-    let Shared { handler, deafened, talking, spk_gain, apm, .. } = shared;
+    let Shared {
+        handler, deafened, talking, spk_gain, apm, client_volumes, mic_test, loopback, ..
+    } = shared;
     // Scratch buffer of 48 kHz stereo samples pulled from the handler.
     let mut scratch: Vec<f32> = Vec::new();
     // Accumulates mono playback samples to feed AEC in exact 10 ms blocks.
@@ -372,8 +385,26 @@ fn build_output(
             for s in scratch.iter_mut() {
                 *s = 0.0;
             }
-            let active = handler.lock().unwrap().fill_buffer(&mut scratch);
-            *talking.lock().unwrap() = active.iter().map(|id| id.0).collect();
+            if *mic_test.lock().unwrap() {
+                // Mic test: play the looped-back mic samples (mono → stereo
+                // scratch) instead of remote talkers.
+                let mut lb = loopback.lock().unwrap();
+                for i in 0..frames {
+                    let s = lb.pop_front().unwrap_or(0.0);
+                    scratch[i * 2] = s;
+                    scratch[i * 2 + 1] = s;
+                }
+                talking.lock().unwrap().clear();
+            } else {
+                // Apply per-speaker volume to each talker's queue before mixing.
+                let vols = client_volumes.lock().unwrap();
+                let mut h = handler.lock().unwrap();
+                for (id, queue) in h.get_mut_queues().iter_mut() {
+                    queue.volume = vols.get(&id.0).copied().unwrap_or(1.0);
+                }
+                let active = h.fill_buffer(&mut scratch);
+                *talking.lock().unwrap() = active.iter().map(|id| id.0).collect();
+            }
             let gain = *spk_gain.lock().unwrap();
             // Map 48 kHz stereo scratch → device channel layout, applying gain.
             for (i, frame) in out.chunks_mut(channels).enumerate() {
@@ -428,7 +459,8 @@ fn build_input(
     let encoder = build_encoder()?;
 
     let Shared {
-        muted, mic_gain, sensitivity, ptt_enabled, ptt_active, apm, denoise_mode, ..
+        muted, mic_gain, sensitivity, ptt_enabled, ptt_active, apm, denoise_mode,
+        mic_test, loopback, ..
     } = shared;
     // Accumulate mono 48 kHz samples until we have a full 20 ms frame.
     let mut acc: Vec<f32> = Vec::with_capacity(FRAME * 2);
@@ -481,8 +513,10 @@ fn build_input(
     let stream = device.build_input_stream(
         &config,
         move |input: &[f32], _| {
-            let gated = *muted.lock().unwrap()
-                || (*ptt_enabled.lock().unwrap() && !*ptt_active.lock().unwrap());
+            // Mic test bypasses mute/PTT so the user can always hear themselves.
+            let gated = !*mic_test.lock().unwrap()
+                && (*muted.lock().unwrap()
+                    || (*ptt_enabled.lock().unwrap() && !*ptt_active.lock().unwrap()));
             if gated {
                 // Mute or PTT release: close the burst cleanly and discard any
                 // half-buffered audio so we don't resume with stale samples.
@@ -543,8 +577,21 @@ fn build_input(
             }
 
             let threshold = *sensitivity.lock().unwrap();
+            let testing = *mic_test.lock().unwrap();
             while acc.len() >= FRAME {
                 let frame: Vec<f32> = acc.drain(..FRAME).collect();
+
+                // Mic test: play the processed frame back locally instead of
+                // sending it to the server. Cap the ring so it can't grow
+                // unbounded if playback stalls.
+                if testing {
+                    let mut lb = loopback.lock().unwrap();
+                    if lb.len() < SAMPLE_RATE as usize {
+                        lb.extend(frame.iter().copied());
+                    }
+                    continue;
+                }
+
                 // Voice activation. threshold == 0.0 means continuous transmit.
                 let voiced = if threshold > 0.0 {
                     let rms = (frame.iter().map(|s| s * s).sum::<f32>()

@@ -4,9 +4,12 @@ mod identity;
 mod market;
 mod state;
 
+use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use connection::{Cmd, ConnManager};
+use serde::Serialize;
 use tauri::Manager;
 
 struct AppState {
@@ -117,6 +120,59 @@ fn set_denoise_mode(state: tauri::State<AppState>, mode: String) {
 }
 
 #[tauri::command]
+fn set_client_volume(state: tauri::State<AppState>, client: u16, volume: f32) {
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::SetClientVolume { client, volume });
+    }
+}
+
+#[tauri::command]
+fn set_mic_test(state: tauri::State<AppState>, on: bool) {
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::SetMicTest(on));
+    }
+}
+
+#[tauri::command]
+fn list_channel_files(state: tauri::State<AppState>, channel: u64) {
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::ListChannelFiles(channel));
+    }
+}
+
+#[tauri::command]
+fn download_file(
+    state: tauri::State<AppState>,
+    channel: u64,
+    path: String,
+    save_to: String,
+) {
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::DownloadFile {
+            channel,
+            path,
+            save_to: PathBuf::from(save_to),
+        });
+    }
+}
+
+#[tauri::command]
+fn upload_file(
+    state: tauri::State<AppState>,
+    channel: u64,
+    path: String,
+    file: String,
+) {
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::UploadFile {
+            channel,
+            path,
+            file: PathBuf::from(file),
+        });
+    }
+}
+
+#[tauri::command]
 fn send_chat(state: tauri::State<AppState>, target: String, message: String) {
     if let Some(conn) = state.conn.lock().unwrap().as_ref() {
         conn.send(Cmd::SendChat { target, message });
@@ -163,6 +219,42 @@ fn use_privilege_key(state: tauri::State<AppState>, token: String) {
     if let Some(conn) = state.conn.lock().unwrap().as_ref() {
         conn.send(Cmd::UsePrivilegeKey(token));
     }
+}
+
+#[derive(Clone, Serialize)]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: Option<String>,
+    download_url: Option<String>,
+    release_notes: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/repos/xrntkk/cspeak/releases/latest")
+        .header("User-Agent", "csspeak-updater")
+        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API returned {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let tag = json["tag_name"].as_str().unwrap_or("").trim_start_matches('v');
+    let latest_version = if tag.is_empty() { None } else { Some(tag.to_string()) };
+    let download_url = json["html_url"].as_str().map(String::from);
+    let release_notes = json["body"].as_str().map(String::from);
+
+    Ok(UpdateInfo { current_version, latest_version, download_url, release_notes })
 }
 
 #[tauri::command]
@@ -233,6 +325,11 @@ pub fn run() {
             set_ptt_active,
             set_apm_enabled,
             set_denoise_mode,
+            set_client_volume,
+            set_mic_test,
+            list_channel_files,
+            download_file,
+            upload_file,
             send_chat,
             join_channel_pw,
             poke,
@@ -240,6 +337,7 @@ pub fn run() {
             mute_client,
             request_connection_info,
             use_privilege_key,
+            check_update,
             market_price_single,
             market_item_kline,
             market_broad_index,

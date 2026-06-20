@@ -93,6 +93,14 @@ export function setDenoiseMode(mode: DenoiseMode) {
   return invoke("set_denoise_mode", { mode });
 }
 
+export function setClientVolume(client: number, volume: number) {
+  return invoke("set_client_volume", { client, volume });
+}
+
+export function setMicTest(on: boolean) {
+  return invoke("set_mic_test", { on });
+}
+
 export interface ChatMessage {
   scope: string;
   from: string;
@@ -128,6 +136,17 @@ export function usePrivilegeKey(token: string) {
   return invoke("use_privilege_key", { token });
 }
 
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string | null;
+  downloadUrl: string | null;
+  releaseNotes: string | null;
+}
+
+export function checkUpdate() {
+  return invoke<UpdateInfo>("check_update");
+}
+
 export interface ConnInfo {
   clientId: number;
   pingMs: number | null;
@@ -152,4 +171,36 @@ export function onSnapshot(cb: (s: ServerSnapshot) => void) {
 
 export function onTalking(cb: (ids: number[]) => void) {
   return listen<number[]>("conn-talking", (e) => cb(e.payload));
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  size: number;
+  isFile: boolean;
+}
+
+export type FtStatus =
+  | { kind: "downloaded"; size: number }
+  | { kind: "uploaded" }
+  | { kind: "failed"; error: string };
+
+export function listChannelFiles(channel: number) {
+  return invoke("list_channel_files", { channel });
+}
+
+export function downloadFile(channel: number, path: string, saveTo: string) {
+  return invoke("download_file", { channel, path, saveTo });
+}
+
+export function uploadFile(channel: number, path: string, file: string) {
+  return invoke("upload_file", { channel, path, file });
+}
+
+export function onFileList(cb: (files: FileEntry[]) => void) {
+  return listen<FileEntry[]>("conn-filelist", (e) => cb(e.payload));
+}
+
+export function onFtStatus(cb: (s: FtStatus) => void) {
+  return listen<FtStatus>("conn-ft-status", (e) => cb(e.payload));
 }

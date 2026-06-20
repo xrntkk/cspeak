@@ -17,11 +17,13 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
+  checkUpdate,
   connect,
   disconnect,
   joinChannel,
   joinChannelPw,
   kickClient,
+  setClientVolume,
   muteClient,
   onChat,
   onConnInfo,
@@ -66,6 +68,8 @@ const DEFAULT_SETTINGS: AudioSettings = {
   pttEnabled: false,
   pttKey: "",
   sfxEnabled: true,
+  micTest: false,
+  updateCheckEnabled: true,
   adminMode: false,
   apmEnabled: true,
   denoiseMode: "deepfilter",
@@ -100,6 +104,14 @@ function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  // Auto-check for updates on launch.
+  useEffect(() => {
+    if (settings.updateCheckEnabled) {
+      checkUpdate().catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const updateBookmarks = (next: Bookmark[]) => {
     setBookmarks(next);
@@ -478,6 +490,7 @@ function ServerView({
   const [deafened, setDeafenedState] = useState(false);
   const [draft, setDraft] = useState("");
   const [mutedClients, setMutedClients] = useState<Set<number>>(new Set());
+  const [clientVolumes, setClientVolumes] = useState<Map<number, number>>(new Map());
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(
     null,
   );
@@ -689,11 +702,30 @@ function ServerView({
         <>
           <div className="fixed inset-0 z-20" onClick={() => setMenu(null)} />
           <div
-            className="fixed z-30 w-36 overflow-hidden rounded-md border border-border bg-popover py-1 text-sm shadow-xl"
+            className="fixed z-30 w-44 overflow-hidden rounded-md border border-border bg-popover py-1 text-sm shadow-xl"
             style={{ left: menu.x, top: menu.y }}
           >
             <div className="border-b border-border px-3 py-1 text-xs text-muted-foreground">
               {menu.name}
+            </div>
+            <div className="border-b border-border px-3 py-2">
+              <div className="mb-1 flex justify-between text-xs text-muted-foreground">
+                <span>音量</span>
+                <span>{Math.round((clientVolumes.get(menu.id) ?? 1) * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.05}
+                value={clientVolumes.get(menu.id) ?? 1}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setClientVolumes((prev) => new Map(prev).set(menu.id, v));
+                  setClientVolume(menu.id, v);
+                }}
+                className="w-full"
+              />
             </div>
             <button
               className="block w-full px-3 py-1.5 text-left hover:bg-accent"
