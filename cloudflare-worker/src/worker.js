@@ -134,10 +134,56 @@ async function handleAgent(request, env) {
 
   if (!upstream.ok) {
     const err = await upstream.text();
-    return json({ error: `upstream ${upstream.status}: ${err.slice(0, 200)}` }, 502);
+    return json({ error: `EvoMap ${upstream.status}: ${err.slice(0, 200)}` }, 502);
   }
 
-  return new Response(upstream.body, {
+  // Transform EvoMap SSE chunks into AI SDK UI-message stream format so the
+  // client's useChat / DefaultChatTransport can consume them directly.
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+
+  (async () => {
+    const reader = upstream.body.getReader();
+    let buf = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        // Process complete SSE lines (end with \n\n)
+        while (buf.includes("\n\n")) {
+          const idx = buf.indexOf("\n\n") + 2;
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx);
+          for (const line of block.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice(6);
+            if (payload === "[DONE]") {
+              writer.write(enc.encode("data: [DONE]\n\n"));
+              continue;
+            }
+            try {
+              const evo = JSON.parse(payload);
+              const content = evo.choices?.[0]?.delta?.content;
+              if (content) {
+                writer.write(enc.encode(
+                  `data: ${JSON.stringify({ type: "text-delta", textDelta: content })}\n\n`
+                ));
+              }
+            } catch { /* skip unparseable chunks */ }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("SSE transform error:", e);
+    } finally {
+      writer.close();
+    }
+  })();
+
+  return new Response(readable, {
     headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS },
   });
 }
