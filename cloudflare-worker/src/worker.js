@@ -12,7 +12,9 @@
 // Optional env:
 //   AGENT_MODEL     — model id (default: gpt-4o-mini)
 
-// Direct SSE proxy to EvoMap — no AI SDK wrappers, simple and reliable.
+// /agent: direct SSE proxy to EvoMap chat/completions. Proven reliable;
+// AI SDK wrappers (convertToModelMessages / toUIMessageStreamResponse)
+// consistently crash under wrangler's bundling. One fetch, stream through.
 
 const BASE = "https://open.steamdt.com";
 const WEB_BASE = "https://www.steamdt.com/api";
@@ -105,34 +107,28 @@ async function handleAgent(request, env) {
   }
 
   let body;
-  try {
-    body = await request.json();
-  } catch {
+  try { body = await request.json(); } catch {
     return json({ error: "invalid JSON" }, 400);
   }
 
   const messages = body.messages;
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+  if (!Array.isArray(messages) || messages.length === 0) {
     return json({ error: "messages required" }, 400);
   }
 
-  // Direct SSE proxy to EvoMap — more reliable than the AI SDK wrapper.
+  // Direct SSE proxy to EvoMap — the AI SDK wrappers (convertToModelMessages,
+  // toUIMessageStreamResponse) consistently crash under wrangler's bundler so
+  // we just forward the request/response streams raw. Proven reliable.
   const evoBody = JSON.stringify({
     model: env.AGENT_MODEL || "evomap-deepseek-v4-flash",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...messages,
-    ],
+    messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
     stream: true,
     max_tokens: 4096,
   });
 
   const upstream = await fetch("https://api.evomap.ai/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.EVOMAP_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${env.EVOMAP_API_KEY}`, "Content-Type": "application/json" },
     body: evoBody,
   });
 
@@ -141,14 +137,8 @@ async function handleAgent(request, env) {
     return json({ error: `upstream ${upstream.status}: ${err.slice(0, 200)}` }, 502);
   }
 
-  // Stream the response back to the client as-is (SSE).
   return new Response(upstream.body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      ...CORS,
-    },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS },
   });
 }
 
