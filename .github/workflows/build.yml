@@ -20,15 +20,13 @@ on:
 
 jobs:
   macos:
+    # Build both Apple targets on macos-14 (aarch64) — cross-compile x86_64
+    # via Rosetta. macos-13 runners have chronic multi-minute queue delays.
+    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
 
