@@ -18,6 +18,7 @@
     "ai": "7.0.0-beta.182",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "framer-motion": "^12.40.0",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.21.0",
     "react": "^19.1.0",
