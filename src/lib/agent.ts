@@ -139,6 +139,32 @@ export const OPENAI_TOOLS = Object.entries(toolSchemas).map(([name, { descriptio
   },
 }));
 
+/// Convert an AI SDK ToolResultOutput into the string content expected by
+/// OpenAI-compatible chat completions. The SDK wraps results as
+/// `{ type, value }`; providers expect just the value (or its JSON string).
+function toolResultToString(output: unknown): string {
+  if (
+    output != null &&
+    typeof output === "object" &&
+    "type" in output &&
+    "value" in output
+  ) {
+    const typed = output as { type: string; value: unknown; reason?: string };
+    switch (typed.type) {
+      case "text":
+      case "error-text":
+        return String(typed.value);
+      case "execution-denied":
+        return typed.reason ?? "Tool execution denied.";
+      case "json":
+      case "error-json":
+      case "content":
+        return JSON.stringify(typed.value);
+    }
+  }
+  return JSON.stringify(output);
+}
+
 /// Convert AI SDK ModelMessages into OpenAI chat-completion messages.
 function modelMessagesToOpenAI(messages: ModelMessage[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
@@ -179,7 +205,7 @@ function modelMessagesToOpenAI(messages: ModelMessage[]): Array<Record<string, u
           out.push({
             role: "tool",
             tool_call_id: (r as { toolCallId: string }).toolCallId,
-            content: JSON.stringify((r as { output: unknown }).output),
+            content: toolResultToString((r as { output: unknown }).output),
           });
         }
         break;
@@ -190,7 +216,7 @@ function modelMessagesToOpenAI(messages: ModelMessage[]): Array<Record<string, u
             out.push({
               role: "tool",
               tool_call_id: (part as { toolCallId: string }).toolCallId,
-              content: JSON.stringify((part as { output: unknown }).output),
+              content: toolResultToString((part as { output: unknown }).output),
             });
           }
         }

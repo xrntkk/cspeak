@@ -1,6 +1,10 @@
 import { useMemo, useRef } from "react";
 import { useChat } from "@ai-sdk/react";
-import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
+import {
+  isToolUIPart,
+  lastAssistantMessageIsCompleteWithToolCalls,
+  type UIMessage,
+} from "ai";
 import { Bot, Send, Sparkles, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { type ServerSnapshot } from "@/lib/ipc";
@@ -135,6 +139,41 @@ export function CsAgentPanel({
     [endpoint, accessToken],
   );
 
+  // The AI SDK calls `sendAutomaticallyWhen` from both `addToolOutput` and the
+  // end of `makeRequest`. When the last tool output completes, both can return
+  // true in the same tick and fire two identical requests, causing duplicated
+  // assistant messages on screen. This ref deduplicates by remembering the set
+  // of completed tool calls we have already auto-submitted for.
+  const autoSentToolCallsRef = useRef<string | null>(null);
+
+  const sendAutomaticallyWhen = useMemo(() => {
+    return ({ messages }: { messages: UIMessage[] }): boolean => {
+      if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) {
+        return false;
+      }
+
+      const lastMessage = messages[messages.length - 1];
+      if (lastMessage?.role !== "assistant") return false;
+
+      const completedToolKey = lastMessage.parts
+        .filter(
+          (p) =>
+            isToolUIPart(p) &&
+            !p.providerExecuted &&
+            (p.state === "output-available" || p.state === "output-error"),
+        )
+        .map((p) => (p as { toolCallId: string }).toolCallId)
+        .sort()
+        .join(",");
+
+      if (autoSentToolCallsRef.current === completedToolKey) {
+        return false;
+      }
+      autoSentToolCallsRef.current = completedToolKey;
+      return true;
+    };
+  }, []);
+
   // Keep the latest TS context in a ref so the stable onToolCall closure can
   // always read the current connection/snapshot state.
   const ctxRef = useRef<AgentToolContext>({ connected, snapshot, accessToken });
@@ -142,7 +181,7 @@ export function CsAgentPanel({
 
   const { messages, sendMessage, status, stop, error, addToolOutput } = useChat({
     transport,
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+    sendAutomaticallyWhen,
     async onToolCall({ toolCall }) {
       if (toolCall.dynamic) return;
       const { toolName, toolCallId, input } = toolCall;
