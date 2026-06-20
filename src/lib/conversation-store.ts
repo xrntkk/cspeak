@@ -30,7 +30,7 @@ function writeConversations(list: StoredConversation[]) {
 }
 
 export function listConversations(): StoredConversation[] {
-  return readConversations().sort((a, b) => b.updatedAt - a.updatedAt);
+  return readConversations().sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export function loadConversation(id: string): StoredConversation | null {
@@ -59,7 +59,7 @@ export function saveConversation(id: string, messages: UIMessage[]) {
   }
 
   // Keep only the most recent 50 conversations to avoid unbounded growth.
-  list.sort((a, b) => b.updatedAt - a.updatedAt);
+  list.sort((a, b) => b.createdAt - a.createdAt);
   writeConversations(list.slice(0, 50));
 }
 
@@ -78,7 +78,7 @@ export function createConversation(): string {
     updatedAt: Date.now(),
     messages: [],
   });
-  list.sort((a, b) => b.updatedAt - a.updatedAt);
+  list.sort((a, b) => b.createdAt - a.createdAt);
   writeConversations(list.slice(0, 50));
   return id;
 }

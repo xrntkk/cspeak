@@ -267,6 +267,7 @@ function AgentChat({
 
   const ctxRef = useRef<AgentToolContext>({ connected, snapshot, accessToken });
   ctxRef.current = { connected, snapshot, accessToken };
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const { messages, sendMessage, status, stop, error, addToolOutput } = useChat({
     transport,
@@ -302,6 +303,11 @@ function AgentChat({
     }, 500);
     return () => clearTimeout(timeout);
   }, [messages, conversationId, onConversationsChange]);
+
+  // Auto-scroll to the bottom (visual bottom) of the conversation.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, status]);
 
   const busy = status === "submitted" || status === "streaming";
 
@@ -383,6 +389,7 @@ function AgentChat({
         )}
 
         {error && <ErrorBanner error={error} noToken={!accessToken} />}
+        <div ref={messagesEndRef} className="shrink-0" />
       </div>
 
       <div className="flex shrink-0 flex-col gap-2 border-t border-border p-3">
