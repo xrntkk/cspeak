@@ -13,13 +13,15 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import {
   checkUpdate,
   downloadUpdate,
   listDevices,
   onUpdateDownloadProgress,
+  openInstaller,
   setApmEnabled,
   setDenoiseMode,
   setInputDevice,
@@ -140,6 +142,7 @@ export function SettingsPanel({
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadedPath, setDownloadedPath] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   const doCheckUpdate = async () => {
     setCheckingUpdate(true);
@@ -147,6 +150,7 @@ export function SettingsPanel({
     setDownloadedPath(null);
     setDownloadProgress(0);
     setDownloadError(null);
+    setOpenError(null);
     try {
       const info = await checkUpdate();
       setUpdateInfo(info);
@@ -178,17 +182,24 @@ export function SettingsPanel({
     setDownloadError(null);
     setDownloadProgress(0);
     setDownloadedPath(null);
+    setOpenError(null);
     try {
       const path = await downloadUpdate(
         updateInfo.recommendedAsset.url,
         updateInfo.recommendedAsset.name,
       );
       setDownloadedPath(path);
-      // Auto-open the installer.
-      try {
-        await openPath(path);
-      } catch {
-        // openPath may fail on some platforms; user can retry manually.
+      // Auto-open the installer using the platform-specific handler.
+      const shouldOpen = await confirm(
+        "安装前需要先关闭当前应用，否则可能导致安装失败。是否现在打开安装包？",
+        { title: "关闭应用以继续安装", kind: "warning" },
+      );
+      if (shouldOpen) {
+        try {
+          await openInstaller(path);
+        } catch (e) {
+          setOpenError(String(e));
+        }
       }
     } catch (e) {
       setDownloadError(String(e));
@@ -581,16 +592,35 @@ export function SettingsPanel({
                   {downloadedPath && (
                     <div className="mt-3 flex flex-col gap-2">
                       <p className="text-xs text-primary">
-                        下载完成,安装包已打开。请按系统提示完成安装。
+                        下载完成，请在弹出的安装界面中完成安装。
                       </p>
                       <button
                         type="button"
-                        onClick={() => openPath(downloadedPath)}
+                        onClick={async () => {
+                          setOpenError(null);
+                          const shouldOpen = await confirm(
+                            "安装前需要先关闭当前应用，否则可能导致安装失败。是否现在打开安装包？",
+                            { title: "关闭应用以继续安装", kind: "warning" },
+                          );
+                          if (!shouldOpen) return;
+                          try {
+                            await openInstaller(downloadedPath);
+                          } catch (e) {
+                            setOpenError(String(e));
+                          }
+                        }}
                         className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
                       >
                         <Download className="size-3.5" />
                         重新打开安装包
                       </button>
+                      {openError && (
+                        <p className="text-xs text-destructive">
+                          打开失败：{openError.length > 80
+                            ? openError.slice(0, 80) + "…"
+                            : openError}
+                        </p>
+                      )}
                     </div>
                   )}
 

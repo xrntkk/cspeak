@@ -159,6 +159,10 @@ export function downloadUpdate(url: string, filename: string) {
   return invoke<string>("download_update", { url, filename });
 }
 
+export function openInstaller(path: string) {
+  return invoke<void>("open_installer", { path });
+}
+
 export interface DownloadProgress {
   downloaded: number;
   total: number;

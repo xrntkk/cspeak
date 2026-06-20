@@ -399,6 +399,80 @@ async fn download_update(
     Ok(save_path.to_string_lossy().to_string())
 }
 
+/// Open a downloaded installer with the platform-appropriate handler.
+/// Returns an error if the file is missing or the launcher fails.
+#[tauri::command]
+async fn open_installer(path: String) -> Result<(), String> {
+    use std::path::Path;
+
+    let path = Path::new(&path);
+    if !path.exists() {
+        return Err("安装包文件不存在或已被删除".into());
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    #[cfg(target_os = "macos")]
+    {
+        if ext == "dmg" {
+            // Mount the disk image and show the mounted volume in Finder.
+            std::process::Command::new("open")
+                .arg(path.as_os_str())
+                .spawn()
+                .map_err(|e| format!("无法打开 DMG: {}", e))?;
+        } else {
+            // Reveal other artifacts in Finder.
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(path.as_os_str())
+                .spawn()
+                .map_err(|e| format!("无法定位安装包: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let path_arg = path.as_os_str().to_string_lossy();
+        if ext == "msi" {
+            std::process::Command::new("msiexec")
+                .arg("/i")
+                .arg(path.as_os_str())
+                .spawn()
+                .map_err(|e| format!("无法启动 MSI 安装程序: {}", e))?;
+        } else {
+            // The empty quoted arg is the window title placeholder required by `start`.
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path_arg])
+                .spawn()
+                .map_err(|e| format!("无法启动安装程序: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if ext == "appimage" {
+            std::process::Command::new(path.as_os_str())
+                .spawn()
+                .map_err(|e| format!("无法运行 AppImage: {}", e))?;
+        } else {
+            std::process::Command::new("xdg-open")
+                .arg(path.as_os_str())
+                .spawn()
+                .map_err(|e| format!("无法打开安装包: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("不支持当前平台".into())
+}
+
 #[tauri::command]
 async fn market_price_single(
     access_token: Option<String>,
@@ -482,6 +556,7 @@ pub fn run() {
             use_privilege_key,
             check_update,
             download_update,
+            open_installer,
             market_price_single,
             market_item_kline,
             market_broad_index,
