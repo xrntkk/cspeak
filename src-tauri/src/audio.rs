@@ -17,148 +17,117 @@ const MAX_OPUS: usize = 1275;
 
 pub type Handler = AudioHandler<ClientId>;
 
-/// WebRTC audio processing module (AEC3 echo cancel + noise suppression + AGC),
-/// shared between the playback and capture callbacks.
-///
-/// The official TS3 client runs this exact pipeline; without it we have no echo
-/// cancellation at all (a speaker + open mic loops the far-end audio straight
-/// back). AEC3 needs to know what we *played* (the far-end / "render" signal)
-/// to subtract it from what we *captured*, so the same `Processor` instance is
-/// fed render frames in the output callback and capture frames in the input
-/// callback. Its methods take `&self`, so an `Arc` (no mutex) is enough.
-pub struct Apm {
-    proc: webrtc_audio_processing::Processor,
-    /// Toggles, read every frame so the UI can flip them live.
-    pub enabled: std::sync::atomic::AtomicBool,
+// ---------------------------------------------------------------------------
+// macOS: WebRTC APM + DeepFilterNet3 (meson/ninja + tract available)
+// Other: stubs so `tauri build` succeeds on Win/Linux CI — the app just
+//        runs without echo cancellation / AI denoise on those targets.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+mod enhance_impl {
+    use super::*;
+
+    pub struct Apm {
+        pub proc: webrtc_audio_processing::Processor,
+        pub enabled: std::sync::atomic::AtomicBool,
+    }
+
+    impl Apm {
+        pub fn new() -> Result<Arc<Self>> {
+            let proc = webrtc_audio_processing::Processor::new(SAMPLE_RATE)
+                .map_err(|e| anyhow!("webrtc apm init: {e:?}"))?;
+            let s = Arc::new(Self { proc, enabled: std::sync::atomic::AtomicBool::new(true) });
+            s.set_denoise(DenoiseMode::Webrtc);
+            Ok(s)
+        }
+
+        pub fn set_denoise(&self, mode: DenoiseMode) {
+            use webrtc_audio_processing::config;
+            let ns = match mode {
+                DenoiseMode::Webrtc => Some(config::NoiseSuppression {
+                    level: config::NoiseSuppressionLevel::VeryHigh,
+                    analyze_linear_aec_output: false,
+                }),
+                _ => None,
+            };
+            self.proc.set_config(&config::Config {
+                high_pass_filter: Some(config::HighPassFilter { apply_in_full_band: true }),
+                echo_canceller: Some(config::EchoCanceller::default()),
+                noise_suppression: ns,
+                gain_controller: Some(config::GainController::GainController2(
+                    config::GainController2::default(),
+                )),
+                ..Default::default()
+            });
+        }
+
+        pub fn is_enabled(&self) -> bool { self.enabled.load(std::sync::atomic::Ordering::Relaxed) }
+        pub fn process_render(&self, frame: &mut [f32]) {
+            let mut chans = [frame]; let _ = self.proc.process_render_frame(&mut chans);
+        }
+        pub fn process_capture(&self, frame: &mut [f32]) {
+            let mut chans = [frame]; let _ = self.proc.process_capture_frame(&mut chans);
+        }
+    }
+
+    pub struct Denoiser {
+        pub model: df::tract::DfTract,
+        pub hop_size: usize,
+    }
+
+    unsafe impl Send for Denoiser {}
+
+    impl Denoiser {
+        pub fn new() -> Result<Self> {
+            use df::tract::{DfParams, DfTract, RuntimeParams};
+            let model = DfTract::new(DfParams::default(), &RuntimeParams::default_with_ch(1))
+                .map_err(|e| anyhow!("deepfilter init: {e:?}"))?;
+            let hop_size = model.hop_size;
+            Ok(Self { model, hop_size })
+        }
+
+        pub fn process(&mut self, frame: &mut [f32]) {
+            use ndarray::{ArrayView2, ArrayViewMut2};
+            let noisy = frame.to_vec();
+            let (Ok(noisy), Ok(mut enh)) = (
+                ArrayView2::from_shape((1, frame.len()), &noisy),
+                ArrayViewMut2::from_shape((1, frame.len()), frame),
+            ) else { return };
+            let _ = self.model.process(noisy, enh);
+        }
+    }
 }
 
-impl Apm {
-    fn new() -> Result<Arc<Self>> {
-        use webrtc_audio_processing::Processor;
-        let proc = Processor::new(SAMPLE_RATE)
-            .map_err(|e| anyhow!("webrtc apm init: {e:?}"))?;
-        let apm = Self {
-            proc,
-            enabled: std::sync::atomic::AtomicBool::new(true),
-        };
-        apm.set_denoise(DenoiseMode::Webrtc);
-        Ok(Arc::new(apm))
+#[cfg(not(target_os = "macos"))]
+mod enhance_impl {
+    use super::*;
+
+    pub struct Apm;
+    impl Apm {
+        pub fn new() -> Result<Arc<Self>> { Err(anyhow!("apm not available on this platform")) }
+        pub fn is_enabled(&self) -> bool { false }
+        pub fn process_render(&self, _: &mut [f32]) {}
+        pub fn process_capture(&self, _: &mut [f32]) {}
     }
 
-    /// Apply config for the given denoise mode. AEC + AGC + high-pass are always
-    /// on; only the WebRTC noise suppressor is toggled — it's disabled when
-    /// DeepFilterNet is doing denoise, to avoid stacking two suppressors.
-    fn set_denoise(&self, mode: DenoiseMode) {
-        use webrtc_audio_processing::config;
-        let noise_suppression = match mode {
-            DenoiseMode::Webrtc => Some(config::NoiseSuppression {
-                // VeryHigh — the most aggressive WebRTC level, to get closer to
-                // the official client's perceived strength (it pairs NS with a
-                // transient suppressor we can't configure here).
-                level: config::NoiseSuppressionLevel::VeryHigh,
-                analyze_linear_aec_output: false,
-            }),
-            DenoiseMode::Off | DenoiseMode::DeepFilter => None,
-        };
-        let cfg = config::Config {
-            high_pass_filter: Some(config::HighPassFilter { apply_in_full_band: true }),
-            echo_canceller: Some(config::EchoCanceller::default()),
-            noise_suppression,
-            gain_controller: Some(config::GainController::GainController2(
-                config::GainController2::default(),
-            )),
-            ..Default::default()
-        };
-        self.proc.set_config(cfg);
-    }
-
-    fn is_enabled(&self) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Feed one 10 ms mono frame of the about-to-be-played signal as the AEC
-    /// reference. `frame.len()` must equal [`APM_FRAME`].
-    fn process_render(&self, frame: &mut [f32]) {
-        let mut chans = [frame];
-        let _ = self.proc.process_render_frame(&mut chans[..]);
-    }
-
-    /// Run one 10 ms mono capture frame through the pipeline in place.
-    fn process_capture(&self, frame: &mut [f32]) {
-        let mut chans = [frame];
-        let _ = self.proc.process_capture_frame(&mut chans[..]);
+    pub struct Denoiser { pub hop_size: usize }
+    impl Denoiser {
+        pub fn new() -> Result<Self> { Ok(Self { hop_size: APM_FRAME }) }
+        pub fn process(&mut self, _: &mut [f32]) {}
     }
 }
+
+pub use enhance_impl::*;
 
 /// Which noise-suppression stage is active. WebRTC and DeepFilter are mutually
 /// exclusive so we never double-denoise (which smears speech). AEC + AGC stay
 /// on regardless — this only selects the denoiser.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DenoiseMode {
-    /// No noise suppression (AEC/AGC still run).
-    Off,
-    /// WebRTC APM's built-in suppressor.
-    Webrtc,
-    /// DeepFilterNet3 — deep-learning denoise, stronger on non-stationary noise.
-    DeepFilter,
-}
+pub enum DenoiseMode { Off, Webrtc, DeepFilter }
 
 impl DenoiseMode {
     pub fn from_str(s: &str) -> Self {
-        match s {
-            "off" => DenoiseMode::Off,
-            "deepfilter" => DenoiseMode::DeepFilter,
-            _ => DenoiseMode::Webrtc,
-        }
-    }
-}
-
-/// DeepFilterNet3 denoiser. Runs on the capture path *after* the APM (so AEC
-/// has already removed echo), replacing WebRTC's suppressor with a much
-/// stronger deep model. Processes one `hop_size` (480 @ 48 kHz = 10 ms) mono
-/// frame at a time, matching the APM block size exactly.
-///
-/// Lives in the input callback (cpal callbacks are single-threaded), so no
-/// locking is needed — `process` takes `&mut self` and the struct is owned by
-/// the closure.
-pub struct Denoiser {
-    model: df::tract::DfTract,
-    pub hop_size: usize,
-}
-
-// `DfTract` holds `Rc<Tensor>`/`Box<dyn OpState>` internally, so it is `!Send`.
-// cpal's stream callback requires `Send` (the stream may outlive the spawning
-// thread), but the callback itself only ever runs on the single audio thread
-// and the `Denoiser` is owned solely by that closure — never shared or moved
-// across threads concurrently. This is the same justification webrtc-audio-
-// processing uses for its own `unsafe impl Send`. Safe in this usage.
-unsafe impl Send for Denoiser {}
-
-impl Denoiser {
-    fn new() -> Result<Self> {
-        use df::tract::{DfParams, DfTract, RuntimeParams};
-        let params = DfParams::default();
-        let rp = RuntimeParams::default_with_ch(1);
-        let model =
-            DfTract::new(params, &rp).map_err(|e| anyhow!("deepfilter init: {e:?}"))?;
-        let hop_size = model.hop_size;
-        Ok(Self { model, hop_size })
-    }
-
-    /// Enhance one `hop_size` mono frame in place.
-    fn process(&mut self, frame: &mut [f32]) {
-        use ndarray::{ArrayView2, ArrayViewMut2};
-        // DFN works out-of-place: read from `noisy`, write to `enh`.
-        let noisy = frame.to_vec();
-        let noisy = match ArrayView2::from_shape((1, frame.len()), &noisy) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let enh = match ArrayViewMut2::from_shape((1, frame.len()), frame) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let _ = self.model.process(noisy, enh);
+        match s { "off" => Self::Off, "deepfilter" => Self::DeepFilter, _ => Self::Webrtc }
     }
 }
 
