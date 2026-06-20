@@ -15,8 +15,15 @@ export interface CatalogueItem {
 
 /// Full searchable item catalogue (name + marketHashName), served from the
 /// Worker's daily cache. No image/price here — fetch those on demand.
-export async function marketCatalogue(): Promise<CatalogueItem[]> {
-  const resp = await fetch(CATALOGUE_URL);
+///
+/// When the Worker has `AGENT_ACCESS_TOKEN` configured, pass it here as a
+/// Bearer header so the request is not rejected with 401.
+export async function marketCatalogue(
+  accessToken?: string,
+): Promise<CatalogueItem[]> {
+  const headers: Record<string, string> = {};
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+  const resp = await fetch(CATALOGUE_URL, { headers });
   const json = await resp.json();
   if (!json.success || !Array.isArray(json.data)) {
     throw new Error(json.error || "catalogue unavailable");

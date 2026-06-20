@@ -20,6 +20,8 @@ export default defineConfig(async () => ({
       "@tauri-apps/api/event",
       "@tauri-apps/plugin-dialog",
       "lightweight-charts",
+      "ai",
+      "@ai-sdk/react",
     ],
   },
 

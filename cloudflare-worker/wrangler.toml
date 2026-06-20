@@ -1,6 +1,16 @@
 name = "csspeak-market"
 main = "src/worker.js"
 compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# CS Agent secrets (set via `wrangler secret put <NAME>`):
+#   EVOMAP_API_KEY     — EvoMap API key for the agent LLM (required for /agent)
+#   AGENT_ACCESS_TOKEN — optional shared token; if set, /agent requires
+#                        `Authorization: Bearer <token>` from clients
+#   AGENT_MODEL        — optional model id override (default: evomap-deepseek-v4-flash)
+# Other secrets:
+#   STEAMDT_KEY     — SteamDT open-platform API key
+#   REFRESH_SECRET  — shared secret for manual catalogue refresh
 
 # Custom domain (workers.dev is often blocked in CN; a proxied custom domain
 # on your own zone routes around it).

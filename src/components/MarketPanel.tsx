@@ -36,7 +36,7 @@ interface DetailTarget {
   prices?: PlatformPrice[];
 }
 
-export function MarketPanel({ dark }: { dark: boolean }) {
+export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?: string }) {
   const [index, setIndex] = useState<BroadIndex | null>(null);
   const [hot, setHot] = useState<MarketListItem[]>([]);
   const [hotLoading, setHotLoading] = useState(true);
@@ -69,7 +69,7 @@ export function MarketPanel({ dark }: { dark: boolean }) {
     } catch {
       /* ignore */
     }
-    marketCatalogue()
+    marketCatalogue(accessToken)
       .then((items) => {
         setCatalogue(items);
         try {
@@ -80,6 +80,7 @@ export function MarketPanel({ dark }: { dark: boolean }) {
         }
       })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const q = query.trim().toLowerCase();

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
+  Bot,
   Download,
   Gauge,
   KeyRound,
@@ -52,6 +53,10 @@ export interface AudioSettings {
   adminMode: boolean;
   /// Whether to auto-check for updates on launch.
   updateCheckEnabled: boolean;
+  /// CS Agent worker endpoint (AI SDK v7 streaming chat).
+  agentEndpoint: string;
+  /// Optional bearer token sent to the Worker when AGENT_ACCESS_TOKEN is set.
+  agentAccessToken: string;
 }
 
 function Section({
@@ -456,6 +461,29 @@ export function SettingsPanel({
                 onChange={(v) => patch({ adminMode: v })}
               />
             </div>
+          </Section>
+
+          <Section icon={<Bot className="size-3.5" />} title="CS Agent">
+            <Row label="后端地址">
+              <input
+                value={settings.agentEndpoint}
+                onChange={(e) => patch({ agentEndpoint: e.target.value })}
+                placeholder="https://…/agent"
+                className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-ring"
+              />
+            </Row>
+            <Row label="访问令牌（可选）">
+              <input
+                type="password"
+                value={settings.agentAccessToken}
+                onChange={(e) => patch({ agentAccessToken: e.target.value })}
+                placeholder="留空则不校验"
+                className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-ring"
+              />
+            </Row>
+            <p className="text-xs text-muted-foreground">
+              若后端启用了访问控制，填入令牌以鉴权。API 密钥仅存于服务端，前端不会接触。
+            </p>
           </Section>
 
           <Section icon={<Download className="size-3.5" />} title="更新">

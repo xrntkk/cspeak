@@ -11,6 +11,7 @@ import {
   Moon,
   PhoneOff,
   RefreshCw,
+  Bot,
   Settings,
   Smile,
   Star,
@@ -61,7 +62,9 @@ import {
 } from "@/lib/ipc";
 import { SettingsPanel, type AudioSettings } from "@/components/SettingsPanel";
 import { MarketPanel } from "@/components/MarketPanel";
+import { CsAgentPanel } from "@/components/CsAgentPanel";
 import { EmojiPicker } from "@/components/EmojiPicker";
+import { AGENT_ENDPOINT_DEFAULT } from "@/lib/agent";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   loadBookmarks,
@@ -91,6 +94,8 @@ const DEFAULT_SETTINGS: AudioSettings = {
   adminMode: false,
   apmEnabled: true,
   denoiseMode: "deepfilter",
+  agentEndpoint: AGENT_ENDPOINT_DEFAULT,
+  agentAccessToken: "",
 };
 
 function App() {
@@ -100,7 +105,7 @@ function App() {
   const [address, setAddress] = useState("");
   const [nickname, setNickname] = useState("csspeak");
   const [showSettings, setShowSettings] = useState(false);
-  const [activeNav, setActiveNav] = useState<"voice" | "soon">("voice");
+  const [activeNav, setActiveNav] = useState<"voice" | "soon" | "agent">("voice");
   const [dark, setDark] = useState(
     () => localStorage.getItem("csspeak.theme") === "dark",
   );
@@ -264,6 +269,12 @@ function App() {
           active={activeNav === "soon"}
           onClick={() => setActiveNav("soon")}
         />
+        <NavButton
+          icon={<Bot className="size-5" />}
+          label="Agent"
+          active={activeNav === "agent"}
+          onClick={() => setActiveNav("agent")}
+        />
         <div className="flex-1" />
         <NavButton
           icon={dark ? <Sun className="size-5" /> : <Moon className="size-5" />}
@@ -360,6 +371,21 @@ function App() {
               />
             )}
           </>
+        ) : activeNav === "agent" ? (
+          <>
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+              <span className="font-semibold">CS Agent</span>
+              <span className="ml-2 text-xs text-muted-foreground">
+                市场分析 · 频道互动
+              </span>
+            </header>
+            <CsAgentPanel
+              endpoint={settings.agentEndpoint}
+              accessToken={settings.agentAccessToken}
+              connected={connected}
+              snapshot={snapshot}
+            />
+          </>
         ) : (
           <>
             <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
@@ -368,7 +394,7 @@ function App() {
                 CS2 饰品 · SteamDT
               </span>
             </header>
-            <MarketPanel dark={dark} />
+            <MarketPanel dark={dark} accessToken={settings.agentAccessToken} />
           </>
         )}
       </div>
