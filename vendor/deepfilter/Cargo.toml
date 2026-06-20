@@ -1,0 +1,68 @@
+[package]
+name = "deep_filter"
+version = "0.5.6"
+authors = ["Hendrik Schröter"]
+edition = "2021"
+description = "Noise supression using deep filtering (vendored, tract-only subset)"
+repository = "https://github.com/Rikorose/DeepFilterNet"
+license = "MIT/Apache-2.0"
+rust-version = "1.70"
+
+# Vendored subset of DeepFilterNet's libDF crate at tag v0.5.6 — the release the
+# bundled DFN3 ONNX model was exported for. Only the real-time inference path
+# (tract feature) is kept: lib.rs (DSP core) + transforms + tract + the bundled
+# model. Dataset/capi/wasm/wav_utils/logging modules and their deps (notably the
+# git-based hdf5) are intentionally dropped.
+#
+# tract is pinned to 0.19.x to match this source: tract 0.20+/0.21+ rewrote the
+# ONNX graph optimizer, and the DFN3 model fails to load there with
+# "Patch created duplicate name" during codegen. 0.19.16 loads it cleanly.
+
+[lib]
+name = "df"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = ["tract", "default-model"]
+transforms = ["dep:thiserror", "dep:ndarray", "dep:rubato"]
+tract = [
+  "transforms",
+  "dep:tract-core",
+  "dep:tract-onnx",
+  "dep:tract-pulse",
+  "dep:tract-hir",
+  "dep:rust-ini",
+  "dep:ndarray",
+  "dep:anyhow",
+  "dep:flate2",
+  "dep:tar",
+]
+default-model = []      # Include default DFN3 model via include_bytes!
+timings = []
+
+[dependencies]
+rustfft = "^6.1.0"
+realfft = "^3.1.0"
+itertools = "0.12"
+num-complex = { version = "^0.4", features = ["serde"] }
+log = { version = "0.4", features = ["std"] }
+rubato = { version = "0.14", optional = true }
+thiserror = { version = "1.0", optional = true }
+anyhow = { version = "1.0", optional = true, features = ["backtrace"] }
+ndarray = { version = "^0.15", optional = true, features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+rust-ini = { version = "^0.21", optional = true }
+tract-core = { version = "=0.19.16", optional = true }
+tract-onnx = { version = "=0.19.16", optional = true }
+tract-pulse = { version = "=0.19.16", optional = true }
+tract-hir = { version = "=0.19.16", optional = true }
+flate2 = { version = "1.0.24", optional = true }
+tar = { version = "0.4.38", optional = true }
+
+[dev-dependencies]
+ndarray = "0.15"
+
+[[example]]
+name = "smoke"
+required-features = ["tract", "default-model"]

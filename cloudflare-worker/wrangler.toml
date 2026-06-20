@@ -1,0 +1,19 @@
+name = "csspeak-market"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+# Custom domain (workers.dev is often blocked in CN; a proxied custom domain
+# on your own zone routes around it).
+routes = [
+  { pattern = "csspeak-market.xrntkk.top", custom_domain = true },
+]
+
+# Daily cron: refresh the full item catalogue from SteamDT's base endpoint
+# (which is rate-limited to once/day per key — the Worker absorbs that limit
+# so all csspeak clients can read the cached catalogue without limits).
+[triggers]
+crons = ["0 4 * * *"]
+
+[[kv_namespaces]]
+binding = "MARKET_CACHE"
+id = "cc107d520f2f4e96832437247b7cf338"

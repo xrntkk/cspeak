@@ -1,0 +1,5 @@
+# Build env for this crate.
+# audiopus_sys bundles an old opus whose CMakeLists requires CMake < 3.5,
+# which CMake 4.x rejects. This shim lets the bundled build configure.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
