@@ -3,18 +3,14 @@
 // Routes:
 //   GET  /base       — cached CS2 item catalogue (daily cron refresh)
 //   GET  /refresh    — force-refresh the catalogue (requires ?secret=)
-//   POST /agent      — CS Agent: AI SDK v7 streamText with client-side tools
+//   POST /agent      — CS Agent: AI SDK v7 UI-message-stream over EvoMap
 //
 // Secrets (set via `wrangler secret put`):
 //   STEAMDT_KEY     — SteamDT open-platform API key
-//   OPENAI_API_KEY  — OpenAI API key for the agent LLM
+//   EVOMAP_API_KEY  — EvoMap API key
 //   REFRESH_SECRET  — shared secret for manual catalogue refresh
 // Optional env:
-//   AGENT_MODEL     — model id (default: gpt-4o-mini)
-
-// /agent: direct SSE proxy to EvoMap chat/completions. Proven reliable;
-// AI SDK wrappers (convertToModelMessages / toUIMessageStreamResponse)
-// consistently crash under wrangler's bundling. One fetch, stream through.
+//   AGENT_MODEL     — model id (default: evomap-deepseek-v4-flash)
 
 const BASE = "https://open.steamdt.com";
 const WEB_BASE = "https://www.steamdt.com/api";
@@ -76,6 +72,134 @@ const SYSTEM_PROMPT = `你是 CS Agent，一个集成在 csspeak（CS2 玩家的
 - 如果用户要求频道互动但未连接 TS 服务器，请提示需要先在「语音」页连接
 - 数据来源于 SteamDT，可能存在延迟，重要决策请以平台实时数据为准`;
 
+/// Tool definitions forwarded to the EvoMap chat/completions API.
+/// Keep in sync with `OPENAI_TOOLS` in `src/lib/agent.ts`.
+const AGENT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "getMarketIndex",
+      description: "获取 CS2 饰品市场大盘指数和近 10 个历史点，用于判断整体走势。",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "searchItems",
+      description: "按关键词搜索 CS2 饰品目录，返回 name 和 marketHashName。",
+      parameters: {
+        type: "object",
+        properties: { keyword: { type: "string", description: "饰品中文名或 market hash name 关键词" } },
+        required: ["keyword"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "getHotList",
+      description: "获取热门饰品榜单，含各平台最低价、最高价和跨平台价差百分比。",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "getItemPrice",
+      description: "查询指定饰品在悠悠有品/BUFF/C5/Steam 等平台的实时价格。",
+      parameters: {
+        type: "object",
+        properties: {
+          marketHashName: { type: "string", description: "饰品的 market hash name" },
+        },
+        required: ["marketHashName"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "getItemKline",
+      description: "查询指定饰品的 K 线数据（日/周/月），用于走势分析。",
+      parameters: {
+        type: "object",
+        properties: {
+          marketHashName: { type: "string", description: "饰品的 market hash name" },
+          platform: { type: "string", description: "平台代码，如 YOUPIN/BUFF/C5/STEAM，默认 YOUPIN" },
+          klineType: { type: "string", description: "K 线类型：1=日，2=周，3=月，默认 1" },
+        },
+        required: ["marketHashName"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sendChannelMessage",
+      description: "在当前 TeamSpeak 频道发送一条文字消息。",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "要发送的消息内容" },
+        },
+        required: ["message"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sendServerMessage",
+      description: "向整个 TeamSpeak 服务器发送一条文字消息。",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "要发送的消息内容" },
+        },
+        required: ["message"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "pokeClient",
+      description: "戳一下指定 TeamSpeak 用户（对方会收到弹窗提醒）。",
+      parameters: {
+        type: "object",
+        properties: {
+          clientName: { type: "string", description: "目标用户昵称或昵称片段" },
+          message: { type: "string", description: "戳人时附带的简短消息" },
+        },
+        required: ["clientName"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listChannels",
+      description: "列出当前 TeamSpeak 服务器的所有频道。",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "listOnlineClients",
+      description: "列出当前 TeamSpeak 服务器所有在线用户及所在频道。",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    },
+  },
+];
+
 // ---------------------------------------------------------------------------
 // Access control
 // ---------------------------------------------------------------------------
@@ -101,6 +225,14 @@ function checkAccess(request, env) {
   return null;
 }
 
+function generateId() {
+  return crypto.randomUUID();
+}
+
+function writeData(writer, enc, obj) {
+  writer.write(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+}
+
 async function handleAgent(request, env) {
   if (!env.EVOMAP_API_KEY) {
     return json({ error: "EVOMAP_API_KEY not configured" }, 500);
@@ -116,12 +248,14 @@ async function handleAgent(request, env) {
     return json({ error: "messages required" }, 400);
   }
 
-  // Direct SSE proxy to EvoMap — the AI SDK wrappers (convertToModelMessages,
-  // toUIMessageStreamResponse) consistently crash under wrangler's bundler so
-  // we just forward the request/response streams raw. Proven reliable.
+  const tools = Array.isArray(body.tools) && body.tools.length > 0 ? body.tools : AGENT_TOOLS;
+
+  // Forward OpenAI-compatible messages + tools to EvoMap.
   const evoBody = JSON.stringify({
     model: env.AGENT_MODEL || "evomap-deepseek-v4-flash",
     messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+    tools,
+    tool_choice: "auto",
     stream: true,
     max_tokens: 4096,
   });
@@ -137,8 +271,8 @@ async function handleAgent(request, env) {
     return json({ error: `EvoMap ${upstream.status}: ${err.slice(0, 200)}` }, 502);
   }
 
-  // Transform EvoMap SSE chunks into AI SDK UI-message stream format so the
-  // client's useChat / DefaultChatTransport can consume them directly.
+  // Transform EvoMap SSE (OpenAI chat-completion stream) into AI SDK
+  // UI-message-stream format so useChat / DefaultChatTransport can consume it.
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const enc = new TextEncoder();
@@ -147,12 +281,42 @@ async function handleAgent(request, env) {
   (async () => {
     const reader = upstream.body.getReader();
     let buf = "";
+    const messageId = generateId();
+    let textStarted = false;
+    let textEnded = false;
+    const toolCalls = []; // indexed by tool_calls[].index
+
+    function endTextIfNeeded() {
+      if (textStarted && !textEnded) {
+        writeData(writer, enc, { type: "text-end", id: messageId });
+        textEnded = true;
+      }
+    }
+
+    function emitToolCalls() {
+      for (const tc of toolCalls) {
+        if (!tc || !tc.id || !tc.name) continue;
+        let input;
+        try {
+          input = tc.args ? JSON.parse(tc.args) : {};
+        } catch {
+          input = { raw: tc.args };
+        }
+        writeData(writer, enc, { type: "tool-input-start", toolCallId: tc.id, toolName: tc.name });
+        writeData(writer, enc, {
+          type: "tool-input-available",
+          toolCallId: tc.id,
+          toolName: tc.name,
+          input,
+        });
+      }
+    }
+
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += dec.decode(value, { stream: true });
-        // Process complete SSE lines (end with \n\n)
         while (buf.includes("\n\n")) {
           const idx = buf.indexOf("\n\n") + 2;
           const block = buf.slice(0, idx);
@@ -161,16 +325,41 @@ async function handleAgent(request, env) {
             if (!line.startsWith("data: ")) continue;
             const payload = line.slice(6);
             if (payload === "[DONE]") {
-              writer.write(enc.encode("data: [DONE]\n\n"));
+              // UI-message-stream ends on writer.close(); no need to forward [DONE].
               continue;
             }
             try {
               const evo = JSON.parse(payload);
-              const content = evo.choices?.[0]?.delta?.content;
-              if (content) {
-                writer.write(enc.encode(
-                  `data: ${JSON.stringify({ type: "text-delta", textDelta: content })}\n\n`
-                ));
+              const delta = evo.choices?.[0]?.delta;
+              const finishReason = evo.choices?.[0]?.finish_reason;
+
+              // Text deltas
+              const content = delta?.content;
+              if (typeof content === "string" && content.length > 0) {
+                if (!textStarted) {
+                  writeData(writer, enc, { type: "text-start", id: messageId });
+                  textStarted = true;
+                }
+                writeData(writer, enc, { type: "text-delta", id: messageId, delta: content });
+              }
+
+              // Tool-call deltas
+              const calls = delta?.tool_calls;
+              if (Array.isArray(calls) && calls.length > 0) {
+                endTextIfNeeded();
+                for (const tc of calls) {
+                  const i = tc.index ?? 0;
+                  if (!toolCalls[i]) toolCalls[i] = { id: "", name: "", args: "" };
+                  if (tc.id) toolCalls[i].id = tc.id;
+                  if (tc.function?.name) toolCalls[i].name += tc.function.name;
+                  if (typeof tc.function?.arguments === "string") {
+                    toolCalls[i].args += tc.function.arguments;
+                  }
+                }
+              }
+
+              if (finishReason && finishReason !== "null" && finishReason !== "stop") {
+                endTextIfNeeded();
               }
             } catch { /* skip unparseable chunks */ }
           }
@@ -179,6 +368,8 @@ async function handleAgent(request, env) {
     } catch (e) {
       console.error("SSE transform error:", e);
     } finally {
+      endTextIfNeeded();
+      emitToolCalls();
       writer.close();
     }
   })();

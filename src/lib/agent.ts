@@ -1,4 +1,12 @@
-import { DefaultChatTransport } from "ai";
+import {
+  DefaultChatTransport,
+  convertToModelMessages,
+  jsonSchema,
+  tool,
+  type ModelMessage,
+  type Tool,
+  type UIMessage,
+} from "ai";
 import {
   marketBroadIndex,
   marketCatalogue,
@@ -22,6 +30,177 @@ export interface AgentToolContext {
   accessToken?: string;
 }
 
+// --- Tool schemas ----------------------------------------------------------
+//
+// Defined as plain JSON Schema so we can feed the same shape to both the AI SDK
+// (via jsonSchema()) and the OpenAI-compatible EvoMap API.
+
+const toolSchemas: Record<string, { description: string; schema: Record<string, unknown> }> = {
+  getMarketIndex: {
+    description: "获取 CS2 饰品市场大盘指数和近 10 个历史点，用于判断整体走势。",
+    schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+  searchItems: {
+    description: "按关键词搜索 CS2 饰品目录，返回 name 和 marketHashName。",
+    schema: {
+      type: "object",
+      properties: { keyword: { type: "string", description: "饰品中文名或 market hash name 关键词" } },
+      required: ["keyword"],
+      additionalProperties: false,
+    },
+  },
+  getHotList: {
+    description: "获取热门饰品榜单，含各平台最低价、最高价和跨平台价差百分比。",
+    schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+  getItemPrice: {
+    description: "查询指定饰品在悠悠有品/BUFF/C5/Steam 等平台的实时价格。",
+    schema: {
+      type: "object",
+      properties: {
+        marketHashName: { type: "string", description: "饰品的 market hash name" },
+      },
+      required: ["marketHashName"],
+      additionalProperties: false,
+    },
+  },
+  getItemKline: {
+    description: "查询指定饰品的 K 线数据（日/周/月），用于走势分析。",
+    schema: {
+      type: "object",
+      properties: {
+        marketHashName: { type: "string", description: "饰品的 market hash name" },
+        platform: { type: "string", description: "平台代码，如 YOUPIN/BUFF/C5/STEAM，默认 YOUPIN" },
+        klineType: { type: "string", description: "K 线类型：1=日，2=周，3=月，默认 1" },
+      },
+      required: ["marketHashName"],
+      additionalProperties: false,
+    },
+  },
+  sendChannelMessage: {
+    description: "在当前 TeamSpeak 频道发送一条文字消息。",
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "要发送的消息内容" },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+  },
+  sendServerMessage: {
+    description: "向整个 TeamSpeak 服务器发送一条文字消息。",
+    schema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "要发送的消息内容" },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+  },
+  pokeClient: {
+    description: "戳一下指定 TeamSpeak 用户（对方会收到弹窗提醒）。",
+    schema: {
+      type: "object",
+      properties: {
+        clientName: { type: "string", description: "目标用户昵称或昵称片段" },
+        message: { type: "string", description: "戳人时附带的简短消息" },
+      },
+      required: ["clientName"],
+      additionalProperties: false,
+    },
+  },
+  listChannels: {
+    description: "列出当前 TeamSpeak 服务器的所有频道。",
+    schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+  listOnlineClients: {
+    description: "列出当前 TeamSpeak 服务器所有在线用户及所在频道。",
+    schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+  },
+};
+
+/// AI SDK ToolSet used by `convertToModelMessages` to understand tool calls.
+export const AGENT_TOOLS: Record<string, Tool> = Object.fromEntries(
+  Object.entries(toolSchemas).map(([name, { description, schema }]) => [
+    name,
+    tool({ description, inputSchema: jsonSchema(schema) }),
+  ]),
+);
+
+/// OpenAI-compatible tool definitions forwarded to the Worker/EvoMap.
+export const OPENAI_TOOLS = Object.entries(toolSchemas).map(([name, { description, schema }]) => ({
+  type: "function" as const,
+  function: {
+    name,
+    description,
+    parameters: schema,
+  },
+}));
+
+/// Convert AI SDK ModelMessages into OpenAI chat-completion messages.
+function modelMessagesToOpenAI(messages: ModelMessage[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const m of messages) {
+    switch (m.role) {
+      case "system": {
+        out.push({ role: "system", content: m.content });
+        break;
+      }
+      case "user": {
+        const text = typeof m.content === "string"
+          ? m.content
+          : m.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("");
+        out.push({ role: "user", content: text });
+        break;
+      }
+      case "assistant": {
+        const parts = typeof m.content === "string" ? [] : m.content;
+        const text = parts.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("");
+        const toolCalls = parts
+          .filter((p) => p.type === "tool-call")
+          .map((p) => ({
+            id: (p as { toolCallId: string }).toolCallId,
+            type: "function" as const,
+            function: {
+              name: (p as { toolName: string }).toolName,
+              arguments: JSON.stringify((p as { input: unknown }).input),
+            },
+          }));
+        const msg: Record<string, unknown> = { role: "assistant" };
+        if (text) msg.content = text;
+        if (toolCalls.length) msg.tool_calls = toolCalls;
+        out.push(msg);
+        // tool-result parts that are attached to the assistant message need to
+        // become separate `tool` messages after it.
+        const results = parts.filter((p) => p.type === "tool-result");
+        for (const r of results) {
+          out.push({
+            role: "tool",
+            tool_call_id: (r as { toolCallId: string }).toolCallId,
+            content: JSON.stringify((r as { output: unknown }).output),
+          });
+        }
+        break;
+      }
+      case "tool": {
+        for (const part of m.content) {
+          if (part.type === "tool-result") {
+            out.push({
+              role: "tool",
+              tool_call_id: (part as { toolCallId: string }).toolCallId,
+              content: JSON.stringify((part as { output: unknown }).output),
+            });
+          }
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /// Build a stable chat transport for the CS Agent worker endpoint.
 /// An optional access token is sent as a Bearer header when the Worker has
 /// `AGENT_ACCESS_TOKEN` configured.
@@ -29,6 +208,18 @@ export function createAgentTransport(endpoint: string, accessToken?: string) {
   return new DefaultChatTransport({
     api: endpoint,
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    prepareSendMessagesRequest: async ({ messages }) => {
+      const modelMessages = await convertToModelMessages(messages as UIMessage[], {
+        tools: AGENT_TOOLS,
+      });
+      return {
+        api: endpoint,
+        body: {
+          messages: modelMessagesToOpenAI(modelMessages),
+          tools: OPENAI_TOOLS,
+        },
+      };
+    },
   });
 }
 
