@@ -136,15 +136,36 @@ export function usePrivilegeKey(token: string) {
   return invoke("use_privilege_key", { token });
 }
 
+export interface UpdateAsset {
+  name: string;
+  url: string;
+  size: number;
+}
+
 export interface UpdateInfo {
   currentVersion: string;
   latestVersion: string | null;
   downloadUrl: string | null;
   releaseNotes: string | null;
+  assets: UpdateAsset[];
+  recommendedAsset: UpdateAsset | null;
 }
 
 export function checkUpdate() {
   return invoke<UpdateInfo>("check_update");
+}
+
+export function downloadUpdate(url: string, filename: string) {
+  return invoke<string>("download_update", { url, filename });
+}
+
+export interface DownloadProgress {
+  downloaded: number;
+  total: number;
+}
+
+export function onUpdateDownloadProgress(cb: (p: DownloadProgress) => void) {
+  return listen<DownloadProgress>("update-download-progress", (e) => cb(e.payload));
 }
 
 export interface ConnInfo {

@@ -1,6 +1,5 @@
-use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -12,8 +11,7 @@ use tsclientlib::data::{Channel, Client};
 use tsclientlib::messages::{c2s, s2c::InMessage};
 use tsclientlib::prelude::*;
 use tsclientlib::{
-    ChannelId, ClientId, Connection, DisconnectOptions, FiletransferHandle, MessageTarget, Reason,
-    StreamItem,
+    ChannelId, ClientId, Connection, DisconnectOptions, MessageTarget, Reason, StreamItem,
 };
 use tsproto_packets::packets::AudioData;
 
@@ -162,6 +160,8 @@ async fn run_session(
             None
         }
     };
+    // Map filetransfer-handle → data to write/read on stream events.
+    let mut pending_uploads: std::collections::HashMap<u16, Vec<u8>> = std::collections::HashMap::new();
 
     emit_status(app, ConnStatus::Connected);
     emit_snapshot(app, &con);
@@ -253,8 +253,8 @@ async fn run_session(
                 let mut files = Vec::new();
                 for p in msg.iter() {
                     files.push(FileEntry {
-                        name: p.name,
-                        path: p.path,
+                        name: p.name.clone(),
+                        path: p.path.clone(),
                         size: p.size,
                         is_file: p.is_file,
                     });
@@ -276,17 +276,23 @@ async fn run_session(
                 });
                 let _ = app.emit("conn-ft-status", FtStatus::Downloaded { size });
             }
-            Item::Event(Some(Ok(StreamItem::FileUpload(_handle, mut result)))) => {
-                let size = result.seek_position;
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    if let Err(e) = tokio_io::AsyncReadExt::read_to_end(&mut result.stream, &mut buf).await {
-                        tracing::error!(%e, "failed to read upload stream");
-                    }
-                });
-                let _ = app.emit("conn-ft-status", FtStatus::Uploaded);
+            Item::Event(Some(Ok(StreamItem::FileUpload(handle, mut result)))) => {
+                let data = pending_uploads.remove(&handle.0);
+                app.emit("conn-ft-status", FtStatus::Uploaded).ok();
+                if let Some(data) = data {
+                    tokio::spawn(async move {
+                        if let Err(e) = tokio_io::AsyncWriteExt::write_all(
+                            &mut result.stream, &data,
+                        )
+                        .await
+                        {
+                            tracing::error!(%e, "failed to write upload data");
+                        }
+                    });
+                }
             }
-            Item::Event(Some(Ok(StreamItem::FiletransferFailed(_handle, error)))) => {
+            Item::Event(Some(Ok(StreamItem::FiletransferFailed(handle, error)))) => {
+                pending_uploads.remove(&handle.0);
                 let _ = app.emit(
                     "conn-ft-status",
                     FtStatus::Failed {
@@ -320,6 +326,20 @@ async fn run_session(
             Item::Command(Some(Cmd::SetMicGain(g))) => {
                 if let Some(engine) = &engine {
                     *engine.shared.mic_gain.lock().unwrap() = g;
+                }
+            }
+            Item::Command(Some(Cmd::SetInputDevice(name))) => {
+                if let Some(engine) = &mut engine {
+                    if let Err(e) = engine.rebuild_input(name.as_deref()) {
+                        tracing::error!(%e, "failed to switch input device");
+                    }
+                }
+            }
+            Item::Command(Some(Cmd::SetOutputDevice(name))) => {
+                if let Some(engine) = &mut engine {
+                    if let Err(e) = engine.rebuild_output(name.as_deref()) {
+                        tracing::error!(%e, "failed to switch output device");
+                    }
                 }
             }
             Item::Command(Some(Cmd::SetSpkGain(g))) => {
@@ -389,9 +409,18 @@ async fn run_session(
                 }
             }
             Item::Command(Some(Cmd::UploadFile { channel, path, file })) => {
-                let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+                let data = match fs::read(&file) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = app.emit("conn-ft-status", FtStatus::Failed { error: e.to_string() });
+                        continue;
+                    }
+                };
+                let size = data.len() as u64;
                 match con.upload_file(ChannelId(channel), &path, None, size, false, false) {
-                    Ok(_handle) => { /* event comes later; upload data in event handler */ }
+                    Ok(handle) => {
+                        pending_uploads.insert(handle.0, data);
+                    }
                     Err(e) => {
                         let _ = app.emit("conn-ft-status", FtStatus::Failed { error: e.to_string() });
                     }

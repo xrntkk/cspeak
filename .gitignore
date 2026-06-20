@@ -30,3 +30,8 @@ Cargo.lock.bak
 
 # Tauri build output
 src-tauri/gen/
+
+# Cloudflare Worker
+cloudflare-worker/node_modules
+cloudflare-worker/.wrangler
+cloudflare-worker/package-lock.json

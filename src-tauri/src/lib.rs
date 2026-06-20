@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use connection::{Cmd, ConnManager};
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 struct AppState {
     conn: Mutex<Option<ConnManager>>,
@@ -222,11 +222,54 @@ fn use_privilege_key(state: tauri::State<AppState>, token: String) {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAsset {
+    name: String,
+    url: String,
+    size: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateInfo {
     current_version: String,
     latest_version: Option<String>,
     download_url: Option<String>,
     release_notes: Option<String>,
+    assets: Vec<UpdateAsset>,
+    recommended_asset: Option<UpdateAsset>,
+}
+
+/// Pick the asset that matches the current OS/arch for in-app installation.
+fn find_recommended_asset(assets: &[UpdateAsset]) -> Option<UpdateAsset> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    // Priority order per platform.
+    let priorities: Vec<Box<dyn Fn(&str) -> bool>> = match (os, arch) {
+        ("macos", "aarch64") => vec![
+            Box::new(|n: &str| n.ends_with(".dmg") && (n.contains("aarch64") || n.contains("arm64"))),
+        ],
+        ("macos", "x86_64") => vec![
+            Box::new(|n: &str| n.ends_with(".dmg") && (n.contains("x64") || n.contains("x86_64"))),
+        ],
+        ("windows", _) => vec![
+            Box::new(|n: &str| n.ends_with(".msi")),
+            Box::new(|n: &str| n.ends_with(".exe")),
+        ],
+        ("linux", _) => vec![
+            Box::new(|n: &str| n.ends_with(".appimage")),
+            Box::new(|n: &str| n.ends_with(".deb")),
+        ],
+        _ => vec![],
+    };
+
+    for matcher in &priorities {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name.to_lowercase())) {
+            return Some(a.clone());
+        }
+    }
+    None
 }
 
 #[tauri::command]
@@ -254,7 +297,106 @@ async fn check_update() -> Result<UpdateInfo, String> {
     let download_url = json["html_url"].as_str().map(String::from);
     let release_notes = json["body"].as_str().map(String::from);
 
-    Ok(UpdateInfo { current_version, latest_version, download_url, release_notes })
+    let assets: Vec<UpdateAsset> = json["assets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    Some(UpdateAsset {
+                        name: a["name"].as_str()?.to_string(),
+                        url: a["browser_download_url"].as_str()?.to_string(),
+                        size: a["size"].as_u64().unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let recommended_asset = find_recommended_asset(&assets);
+
+    Ok(UpdateInfo {
+        current_version,
+        latest_version,
+        download_url,
+        release_notes,
+        assets,
+        recommended_asset,
+    })
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    downloaded: u64,
+    total: u64,
+}
+
+/// Download an update asset to a temp file, emitting progress events.
+/// Returns the local file path on success.
+#[tauri::command]
+async fn download_update(
+    app: tauri::AppHandle,
+    url: String,
+    filename: String,
+) -> Result<String, String> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "csspeak-updater")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status()));
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+    let save_path = std::env::temp_dir().join(&filename);
+
+    let mut file = tokio::fs::File::create(&save_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emitted: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+
+        // Throttle progress events: emit at most every 100 KB.
+        if downloaded - last_emitted >= 100_000 || (total > 0 && downloaded == total) {
+            let _ = app.emit(
+                "update-download-progress",
+                DownloadProgress { downloaded, total },
+            );
+            last_emitted = downloaded;
+        }
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+
+    // Make AppImage executable on Linux so it can be launched directly.
+    #[cfg(target_os = "linux")]
+    {
+        if filename.ends_with(".AppImage") {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&save_path)
+                .map_err(|e| e.to_string())?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&save_path, perms).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(save_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -300,6 +442,7 @@ pub fn run() {
     tracing_subscriber::fmt::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             conn: Mutex::new(None),
         })
@@ -338,6 +481,7 @@ pub fn run() {
             request_connection_info,
             use_privilege_key,
             check_update,
+            download_update,
             market_price_single,
             market_item_kline,
             market_broad_index,

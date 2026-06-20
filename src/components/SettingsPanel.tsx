@@ -12,11 +12,13 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
 import {
   checkUpdate,
+  downloadUpdate,
   listDevices,
+  onUpdateDownloadProgress,
   setApmEnabled,
   setDenoiseMode,
   setInputDevice,
@@ -129,10 +131,17 @@ export function SettingsPanel({
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadedPath, setDownloadedPath] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const doCheckUpdate = async () => {
     setCheckingUpdate(true);
     setUpdateError(null);
+    setDownloadedPath(null);
+    setDownloadProgress(0);
+    setDownloadError(null);
     try {
       const info = await checkUpdate();
       setUpdateInfo(info);
@@ -140,6 +149,46 @@ export function SettingsPanel({
       setUpdateError(String(e));
     } finally {
       setCheckingUpdate(false);
+    }
+  };
+
+  // Listen for download progress events while downloading.
+  useEffect(() => {
+    if (!downloading) return;
+    const unlisten = onUpdateDownloadProgress((p) => {
+      if (p.total > 0) {
+        setDownloadProgress(Math.round((p.downloaded / p.total) * 100));
+      } else {
+        setDownloadProgress(-1); // indeterminate
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [downloading]);
+
+  const doDownload = async () => {
+    if (!updateInfo?.recommendedAsset) return;
+    setDownloading(true);
+    setDownloadError(null);
+    setDownloadProgress(0);
+    setDownloadedPath(null);
+    try {
+      const path = await downloadUpdate(
+        updateInfo.recommendedAsset.url,
+        updateInfo.recommendedAsset.name,
+      );
+      setDownloadedPath(path);
+      // Auto-open the installer.
+      try {
+        await openPath(path);
+      } catch {
+        // openPath may fail on some platforms; user can retry manually.
+      }
+    } catch (e) {
+      setDownloadError(String(e));
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -457,16 +506,88 @@ export function SettingsPanel({
                       {updateInfo.releaseNotes}
                     </p>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (updateInfo.downloadUrl) openUrl(updateInfo.downloadUrl);
-                    }}
-                    className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-                  >
-                    <Download className="size-3.5" />
-                    前往下载
-                  </button>
+
+                  {/* In-app download + install when a platform asset is found */}
+                  {updateInfo.recommendedAsset && !downloadedPath && (
+                    <>
+                      {downloading ? (
+                        <div className="mt-3 flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between text-xs text-muted-foreground">
+                            <span>下载中…</span>
+                            <span>
+                              {downloadProgress >= 0 ? `${downloadProgress}%` : "…"}
+                            </span>
+                          </div>
+                          <div className="h-2 w-full overflow-hidden rounded-full bg-accent">
+                            <div
+                              className="h-full rounded-full bg-primary transition-all"
+                              style={{
+                                width: downloadProgress >= 0 ? `${downloadProgress}%` : "100%",
+                                animation: downloadProgress < 0 ? "pulse 1.5s infinite" : undefined,
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={downloading}
+                          onClick={doDownload}
+                          className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+                        >
+                          <Download className="size-3.5" />
+                          立即更新
+                        </button>
+                      )}
+                      {downloadError && (
+                        <p className="mt-2 text-xs text-destructive">
+                          下载失败:{downloadError.length > 60
+                            ? downloadError.slice(0, 60) + "…"
+                            : downloadError}
+                        </p>
+                      )}
+                    </>
+                  )}
+
+                  {/* Download complete: offer to open the installer */}
+                  {downloadedPath && (
+                    <div className="mt-3 flex flex-col gap-2">
+                      <p className="text-xs text-primary">
+                        下载完成,安装包已打开。请按系统提示完成安装。
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => openPath(downloadedPath)}
+                        className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                      >
+                        <Download className="size-3.5" />
+                        重新打开安装包
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Fallback: open release page in browser */}
+                  {!updateInfo.recommendedAsset && updateInfo.downloadUrl && (
+                    <button
+                      type="button"
+                      onClick={() => openUrl(updateInfo.downloadUrl!)}
+                      className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                    >
+                      <Download className="size-3.5" />
+                      前往下载页
+                    </button>
+                  )}
+
+                  {/* Secondary link to release page even when in-app download is available */}
+                  {updateInfo.recommendedAsset && updateInfo.downloadUrl && (
+                    <button
+                      type="button"
+                      onClick={() => openUrl(updateInfo.downloadUrl!)}
+                      className="mt-2 w-full text-center text-xs text-muted-foreground underline-offset-2 hover:underline"
+                    >
+                      或在浏览器中打开发布页
+                    </button>
+                  )}
                 </div>
               )}
 

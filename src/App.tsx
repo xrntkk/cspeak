@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  File,
+  Folder,
+  FolderOpen,
   Hash,
   Headphones,
   LayoutGrid,
@@ -7,9 +10,12 @@ import {
   MicOff,
   Moon,
   PhoneOff,
+  RefreshCw,
   Settings,
+  Smile,
   Star,
   Sun,
+  Upload,
   User,
   Volume2,
   VolumeX,
@@ -23,10 +29,13 @@ import {
   joinChannel,
   joinChannelPw,
   kickClient,
+  listChannelFiles,
   setClientVolume,
   muteClient,
   onChat,
   onConnInfo,
+  onFileList,
+  onFtStatus,
   onSnapshot,
   onStatus,
   onTalking,
@@ -44,12 +53,16 @@ import {
   setPttEnabled,
   setSensitivity,
   setSpkGain,
+  uploadFile,
   type ChatMessage,
   type ConnStatus,
+  type FileEntry,
   type ServerSnapshot,
 } from "@/lib/ipc";
 import { SettingsPanel, type AudioSettings } from "@/components/SettingsPanel";
 import { MarketPanel } from "@/components/MarketPanel";
+import { EmojiPicker } from "@/components/EmojiPicker";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   loadBookmarks,
   loadSettings,
@@ -58,6 +71,11 @@ import {
   type Bookmark,
 } from "@/lib/storage";
 import { playJoin, playLeave } from "@/lib/sfx";
+import {
+  Announcement,
+  AnnouncementTag,
+  AnnouncementTitle,
+} from "@/components/ui/announcement";
 
 const DEFAULT_SETTINGS: AudioSettings = {
   inputDevice: null,
@@ -99,6 +117,8 @@ function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => loadBookmarks());
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [ping, setPing] = useState<number | null>(null);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
 
   // Persist settings whenever they change.
   useEffect(() => {
@@ -108,7 +128,16 @@ function App() {
   // Auto-check for updates on launch.
   useEffect(() => {
     if (settings.updateCheckEnabled) {
-      checkUpdate().catch(() => {});
+      checkUpdate()
+        .then((info) => {
+          if (
+            info.latestVersion &&
+            info.latestVersion !== info.currentVersion
+          ) {
+            setLatestVersion(info.latestVersion);
+          }
+        })
+        .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -252,6 +281,32 @@ function App() {
 
       {/* Main content area */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {latestVersion && !updateDismissed && (
+          <div className="flex h-12 shrink-0 items-center justify-center gap-2 border-b border-primary/20 bg-primary/5 px-4">
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="focus:outline-none"
+              title="点击前往更新"
+            >
+              <Announcement className="cursor-pointer">
+                <AnnouncementTag>新版本</AnnouncementTag>
+                <AnnouncementTitle>
+                  发现新版本 v{latestVersion}，点击更新
+                  <RefreshCw size={14} className="shrink-0 text-muted-foreground" />
+                </AnnouncementTitle>
+              </Announcement>
+            </button>
+            <button
+              type="button"
+              onClick={() => setUpdateDismissed(true)}
+              className="flex size-6 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title="关闭"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
         {activeNav === "voice" ? (
           <>
             <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
@@ -489,6 +544,9 @@ function ServerView({
   const [muted, setMutedState] = useState(false);
   const [deafened, setDeafenedState] = useState(false);
   const [draft, setDraft] = useState("");
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
+  const [files, setFiles] = useState<FileEntry[]>([]);
   const [mutedClients, setMutedClients] = useState<Set<number>>(new Set());
   const [clientVolumes, setClientVolumes] = useState<Map<number, number>>(new Map());
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(
@@ -500,6 +558,23 @@ function ServerView({
     placeholder: string;
     onSubmit: (value: string) => void;
   } | null>(null);
+
+  const refreshFiles = () => {
+    if (snapshot) {
+      const me = snapshot.clients.find((c) => c.id === snapshot.ownClient);
+      if (me) listChannelFiles(me.channel);
+    }
+  };
+
+  // Subscribe to file list events and refresh on connect.
+  useEffect(() => {
+    const unList = onFileList(setFiles);
+    const unFt = onFtStatus(() => refreshFiles());
+    return () => {
+      unList.then((f) => f());
+      unFt.then((f) => f());
+    };
+  }, []);
   const [dialogValue, setDialogValue] = useState("");
   const askInput = (
     title: string,
@@ -626,7 +701,7 @@ function ServerView({
                   </span>
                   <span className="font-medium text-primary">{m.from}</span>
                   <span className="text-muted-foreground">：</span>
-                  <span>{m.message}</span>
+                  <MessageBody text={m.message} />
                 </div>
               ))}
             </div>
@@ -642,6 +717,24 @@ function ServerView({
               setDraft("");
             }}
           >
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowEmoji(!showEmoji)}
+                className="flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent"
+              >
+                <Smile className="size-4" />
+              </button>
+              {showEmoji && (
+                <EmojiPicker
+                  onSelect={(text) => {
+                    setDraft((prev) => prev + text);
+                    setShowEmoji(false);
+                  }}
+                  onClose={() => setShowEmoji(false)}
+                />
+              )}
+            </div>
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -658,6 +751,63 @@ function ServerView({
           </form>
         </main>
       </div>
+
+      {showFiles && (
+        <div className="flex h-52 shrink-0 flex-col border-t border-border">
+          <div className="flex items-center gap-2 border-b border-border px-4 py-1.5">
+            <FolderOpen className="size-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium">频道文件</span>
+            <div className="flex-1" />
+            <button
+              onClick={refreshFiles}
+              title="刷新"
+              className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent"
+            >
+              <RefreshCw className="size-3.5" />
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  const sel = await open({ multiple: false });
+                  if (sel && typeof sel === "string" && snapshot) {
+                    const name = sel.split("/").pop() || "file";
+                    const me = snapshot.clients.find((c) => c.id === snapshot.ownClient);
+                    if (me) uploadFile(me.channel, `/${name}`, sel);
+                  }
+                } catch { /* dialog not available */ }
+              }}
+              title="上传"
+              className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-accent"
+            >
+              <Upload className="size-3.5" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2">
+            {files.length === 0 ? (
+              <div className="text-xs text-muted-foreground">
+                点击刷新查看频道文件
+              </div>
+            ) : (
+              files.map((f, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-accent"
+                >
+                  {f.isFile ? <File className="size-3.5 text-muted-foreground" /> : <Folder className="size-3.5 text-muted-foreground" />}
+                  <span className="flex-1 truncate">{f.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {f.size > 1024 * 1024
+                      ? `${(f.size / (1024 * 1024)).toFixed(1)} MB`
+                      : f.size > 1024
+                        ? `${(f.size / 1024).toFixed(0)} KB`
+                        : `${f.size} B`}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       <footer className="flex h-16 shrink-0 items-center gap-2 border-t border-border px-4">
         <button
@@ -687,6 +837,19 @@ function ServerView({
         >
           {deafened ? <VolumeX className="size-4" /> : <Volume2 className="size-4" />}
           {deafened ? "已闭麦" : "扬声器"}
+        </button>
+        <button
+          onClick={() => {
+            setShowFiles(!showFiles);
+            if (!showFiles) refreshFiles();
+          }}
+          className={cn(
+            "flex flex-col items-center gap-0.5 rounded-md px-3 py-1.5 text-xs transition-colors hover:bg-accent",
+            showFiles ? "text-primary" : "text-muted-foreground",
+          )}
+        >
+          <FolderOpen className="size-4" />
+          文件
         </button>
         <div className="flex-1" />
         <button
@@ -826,6 +989,45 @@ function ServerView({
         </div>
       )}
     </>
+  );
+}
+
+function isImageUrl(s: string): boolean {
+  return /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i.test(s)
+    || /(imgur|tenor|gfycat|imgbb|postimg)/i.test(s);
+}
+
+function MessageBody({ text }: { text: string }) {
+  const parts = useMemo(() => {
+    const out: { type: "text" | "img"; value: string }[] = [];
+    const words = text.split(/(\s+)/);
+    for (const w of words) {
+      const trimmed = w.trim();
+      if (trimmed && isImageUrl(trimmed)) {
+        out.push({ type: "img", value: trimmed });
+      } else {
+        out.push({ type: "text", value: w });
+      }
+    }
+    return out;
+  }, [text]);
+
+  return (
+    <span>
+      {parts.map((p, i) =>
+        p.type === "img" ? (
+          <img
+            key={i}
+            src={p.value}
+            alt=""
+            className="inline-block max-h-40 max-w-[200px] rounded object-contain"
+            loading="lazy"
+          />
+        ) : (
+          <span key={i}>{p.value}</span>
+        ),
+      )}
+    </span>
   );
 }
 

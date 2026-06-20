@@ -18,6 +18,7 @@ export default defineConfig(async () => ({
     include: [
       "@tauri-apps/api/core",
       "@tauri-apps/api/event",
+      "@tauri-apps/plugin-dialog",
       "lightweight-charts",
     ],
   },
