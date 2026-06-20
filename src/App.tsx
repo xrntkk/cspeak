@@ -1,28 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
+  Bot,
   File,
   Folder,
   FolderOpen,
   Hash,
-  Headphones,
   LayoutGrid,
   Mic,
   MicOff,
-  Moon,
+  Monitor,
   PhoneOff,
   RefreshCw,
-  Bot,
   Settings,
   Smile,
-  Star,
   Sun,
+  Moon,
   Upload,
   User,
   Volume2,
   VolumeX,
   X,
 } from "lucide-react";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { cn } from "@/lib/utils";
+import { useTheme } from "@/hooks/use-theme";
+import { WelcomePage } from "@/components/WelcomePage";
 import {
   checkUpdate,
   connect,
@@ -68,10 +71,13 @@ import { AGENT_ENDPOINT_DEFAULT } from "@/lib/agent";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   loadBookmarks,
+  loadRecentConnections,
   loadSettings,
   saveBookmarks,
+  saveRecentConnection,
   saveSettings,
   type Bookmark,
+  type RecentConnection,
 } from "@/lib/storage";
 import { playJoin, playLeave } from "@/lib/sfx";
 import {
@@ -79,7 +85,7 @@ import {
   AnnouncementTag,
   AnnouncementTitle,
 } from "@/components/ui/announcement";
-import { Tiles } from "@/components/ui/tiles";
+import { Dock } from "@/components/ui/dock-two";
 
 const DEFAULT_SETTINGS: AudioSettings = {
   inputDevice: null,
@@ -105,22 +111,18 @@ function App() {
   const [talking, setTalking] = useState<number[]>([]);
   const [address, setAddress] = useState("");
   const [nickname, setNickname] = useState("csspeak");
-  const [showSettings, setShowSettings] = useState(false);
-  const [activeNav, setActiveNav] = useState<"voice" | "soon" | "agent">("voice");
-  const [dark, setDark] = useState(
-    () => localStorage.getItem("csspeak.theme") === "dark",
-  );
+  const [activeNav, setActiveNav] = useState<"voice" | "soon" | "agent" | "settings">("voice");
+  const { mode: themeMode, resolved: themeResolved, cycle: cycleTheme } = useTheme();
+  const dark = themeResolved === "dark";
 
-  const toggleTheme = () => {
-    const next = !dark;
-    setDark(next);
-    document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("csspeak.theme", next ? "dark" : "light");
-  };
+  const themeIcon = themeMode === "dark" ? Sun : themeMode === "light" ? Moon : Monitor;
+  const themeLabel = themeMode === "dark" ? "亮色" : themeMode === "light" ? "暗色" : "系统";
+
   const [settings, setSettings] = useState<AudioSettings>(() =>
     loadSettings(DEFAULT_SETTINGS),
   );
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => loadBookmarks());
+  const [recent, setRecent] = useState<RecentConnection[]>(() => loadRecentConnections());
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [ping, setPing] = useState<number | null>(null);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
@@ -253,51 +255,27 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen bg-background text-foreground">
-      {/* Left navigation rail */}
-      <nav className="flex w-16 shrink-0 flex-col items-center gap-2 border-r border-sidebar-border bg-sidebar py-3">
-        <div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/15">
-          <Headphones className="size-5 text-primary" />
-        </div>
-        <NavButton
-          icon={<Mic className="size-5" />}
-          label="语音"
-          active={activeNav === "voice"}
-          onClick={() => setActiveNav("voice")}
+      {/* Left sidebar dock */}
+      <aside className="flex w-20 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-3">
+        <Dock
+          direction="vertical"
+          items={[
+            { icon: Mic, label: "语音", active: activeNav === "voice", onClick: () => setActiveNav("voice") },
+            { icon: LayoutGrid, label: "行情", active: activeNav === "soon", onClick: () => setActiveNav("soon") },
+            { icon: Bot, label: "Agent", active: activeNav === "agent", onClick: () => setActiveNav("agent") },
+            { icon: Settings, label: "设置", active: activeNav === "settings", onClick: () => setActiveNav("settings") },
+            { icon: themeIcon, label: themeLabel, onClick: cycleTheme },
+          ]}
         />
-        <NavButton
-          icon={<LayoutGrid className="size-5" />}
-          label="行情"
-          active={activeNav === "soon"}
-          onClick={() => setActiveNav("soon")}
-        />
-        <NavButton
-          icon={<Bot className="size-5" />}
-          label="Agent"
-          active={activeNav === "agent"}
-          onClick={() => setActiveNav("agent")}
-        />
-        <div className="flex-1" />
-        <NavButton
-          icon={dark ? <Sun className="size-5" /> : <Moon className="size-5" />}
-          label={dark ? "亮色" : "暗色"}
-          active={false}
-          onClick={toggleTheme}
-        />
-        <NavButton
-          icon={<Settings className="size-5" />}
-          label="设置"
-          active={false}
-          onClick={() => setShowSettings(true)}
-        />
-      </nav>
+      </aside>
 
       {/* Main content area */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {latestVersion && !updateDismissed && (
           <div className="flex h-12 shrink-0 items-center justify-center gap-2 border-b border-primary/20 bg-primary/5 px-4">
             <button
               type="button"
-              onClick={() => setShowSettings(true)}
+              onClick={() => setActiveNav("settings")}
               className="focus:outline-none"
               title="点击前往更新"
             >
@@ -319,7 +297,16 @@ function App() {
             </button>
           </div>
         )}
-        {activeNav === "voice" ? (
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeNav}
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+            className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          >
+            {activeNav === "voice" ? (
           <>
             <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
               <span className="font-semibold">语音</span>
@@ -339,14 +326,20 @@ function App() {
             </header>
 
             {!connected ? (
-              <ConnectForm
+              <WelcomePage
                 address={address}
                 nickname={nickname}
                 busy={busy}
                 bookmarks={bookmarks}
+                recent={recent}
+                latestVersion={latestVersion}
                 onAddress={setAddress}
                 onNickname={setNickname}
-                onConnect={() => connect(address, nickname)}
+                onConnect={() => {
+                  saveRecentConnection(address, nickname);
+                  setRecent(loadRecentConnections());
+                  connect(address, nickname);
+                }}
                 onSelectBookmark={(b) => {
                   setAddress(b.address);
                   setNickname(b.nickname);
@@ -361,6 +354,11 @@ function App() {
                 onRemoveBookmark={(addr) =>
                   updateBookmarks(bookmarks.filter((b) => b.address !== addr))
                 }
+                onSelectRecent={(r) => {
+                  setAddress(r.address);
+                  setNickname(r.nickname);
+                }}
+                onDismissUpdate={() => setUpdateDismissed(true)}
               />
             ) : (
               <ServerView
@@ -387,6 +385,17 @@ function App() {
               snapshot={snapshot}
             />
           </>
+        ) : activeNav === "settings" ? (
+          <>
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+              <span className="font-semibold">设置</span>
+            </header>
+            <SettingsPanel
+              settings={settings}
+              onChange={setSettings}
+              inline
+            />
+          </>
         ) : (
           <>
             <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
@@ -398,163 +407,10 @@ function App() {
             <MarketPanel dark={dark} accessToken={settings.agentAccessToken} />
           </>
         )}
+          </motion.div>
+        </AnimatePresence>
       </div>
-
-      {showSettings && (
-        <SettingsPanel
-          settings={settings}
-          onChange={setSettings}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
     </div>
-  );
-}
-
-function NavButton({
-  icon,
-  label,
-  active,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex w-full flex-col items-center gap-1 py-2 text-[10px] transition-colors",
-        active
-          ? "text-primary"
-          : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      <span
-        className={cn(
-          "flex size-10 items-center justify-center rounded-lg transition-colors",
-          active ? "bg-primary/15" : "hover:bg-accent",
-        )}
-      >
-        {icon}
-      </span>
-      {label}
-    </button>
-  );
-}
-
-function ConnectForm({
-  address,
-  nickname,
-  busy,
-  bookmarks,
-  onAddress,
-  onNickname,
-  onConnect,
-  onSelectBookmark,
-  onAddBookmark,
-  onRemoveBookmark,
-}: {
-  address: string;
-  nickname: string;
-  busy: boolean;
-  bookmarks: Bookmark[];
-  onAddress: (v: string) => void;
-  onNickname: (v: string) => void;
-  onConnect: () => void;
-  onSelectBookmark: (b: Bookmark) => void;
-  onAddBookmark: () => void;
-  onRemoveBookmark: (address: string) => void;
-}) {
-  return (
-    <div className="relative flex flex-1 items-center justify-center overflow-hidden">
-      <div className="absolute inset-0 opacity-[0.18] dark:opacity-[0.12]">
-        <Tiles rows={60} cols={10} tileSize="md" />
-      </div>
-      <form
-        className="relative z-10 flex w-80 flex-col gap-3 rounded-lg border border-border bg-card p-6 shadow-sm"
-        onSubmit={(e) => {
-          e.preventDefault();
-          onConnect();
-        }}
-      >
-        <h2 className="text-sm font-semibold">连接到服务器</h2>
-        <Field label="服务器地址">
-          <input
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:border-ring"
-            placeholder="ts.example.com"
-            value={address}
-            onChange={(e) => onAddress(e.target.value)}
-          />
-        </Field>
-        <Field label="昵称">
-          <input
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:border-ring"
-            value={nickname}
-            onChange={(e) => onNickname(e.target.value)}
-          />
-        </Field>
-        <div className="flex gap-2">
-          <button
-            type="submit"
-            disabled={busy || !address}
-            className="mt-1 h-9 flex-1 rounded-md bg-primary text-sm font-medium text-primary-foreground disabled:opacity-50"
-          >
-            {busy ? "连接中…" : "连接"}
-          </button>
-          <button
-            type="button"
-            onClick={onAddBookmark}
-            disabled={!address}
-            title="收藏当前地址"
-            className="mt-1 flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent disabled:opacity-50"
-          >
-            <Star className="size-4" />
-          </button>
-        </div>
-
-        {bookmarks.length > 0 && (
-          <div className="flex flex-col gap-1 border-t border-border pt-3">
-            <span className="text-xs text-muted-foreground">收藏的服务器</span>
-            {bookmarks.map((b) => (
-              <div
-                key={b.address}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-accent"
-              >
-                <button
-                  type="button"
-                  onClick={() => onSelectBookmark(b)}
-                  className="flex-1 text-left"
-                >
-                  {b.label}
-                  <span className="ml-1 text-xs text-muted-foreground">
-                    {b.nickname}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onRemoveBookmark(b.address)}
-                  className="text-muted-foreground hover:text-destructive"
-                >
-                  <X className="size-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </form>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      {children}
-    </label>
   );
 }
 
@@ -702,15 +558,15 @@ function ServerView({
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto p-4">
-            <div className="flex flex-col gap-1.5">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col-reverse overflow-y-auto p-4">
+            <div className="flex min-w-0 flex-col gap-1.5">
               {snapshot.welcomeMessage && (
                 <div className="rounded-md bg-card p-2 text-xs text-muted-foreground">
                   {snapshot.welcomeMessage}
                 </div>
               )}
               {chat.map((m, i) => (
-                <div key={i} className="text-sm">
+                <div key={i} className="min-w-0 text-sm break-words">
                   <span
                     className={cn(
                       "text-xs",
@@ -738,7 +594,7 @@ function ServerView({
           </div>
 
           <form
-            className="flex gap-2 border-t border-border p-3"
+            className="flex shrink-0 gap-2 border-t border-border p-3"
             onSubmit={(e) => {
               e.preventDefault();
               const text = draft.trim();
@@ -1028,37 +884,20 @@ function isImageUrl(s: string): boolean {
 }
 
 function MessageBody({ text }: { text: string }) {
-  const parts = useMemo(() => {
-    const out: { type: "text" | "img"; value: string }[] = [];
-    const words = text.split(/(\s+)/);
-    for (const w of words) {
-      const trimmed = w.trim();
-      if (trimmed && isImageUrl(trimmed)) {
-        out.push({ type: "img", value: trimmed });
-      } else {
-        out.push({ type: "text", value: w });
-      }
-    }
-    return out;
+  const markdown = useMemo(() => {
+    return text
+      .split(/(\s+)/)
+      .map((w) => {
+        const trimmed = w.trim();
+        if (trimmed && isImageUrl(trimmed)) {
+          return `![image](${trimmed})`;
+        }
+        return w;
+      })
+      .join("");
   }, [text]);
 
-  return (
-    <span>
-      {parts.map((p, i) =>
-        p.type === "img" ? (
-          <img
-            key={i}
-            src={p.value}
-            alt=""
-            className="inline-block max-h-40 max-w-[200px] rounded object-contain"
-            loading="lazy"
-          />
-        ) : (
-          <span key={i}>{p.value}</span>
-        ),
-      )}
-    </span>
-  );
+  return <MarkdownContent compact>{markdown}</MarkdownContent>;
 }
 
 export default App;

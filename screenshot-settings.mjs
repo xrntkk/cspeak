@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+await page.goto('http://localhost:1420/');
+await page.waitForTimeout(1000);
+const buttons = await page.locator('aside button').all();
+await buttons[buttons.length - 1].click();
+await page.waitForTimeout(1000);
+await page.screenshot({ path: '/tmp/dock-settings-inline.png' });
+await browser.close();

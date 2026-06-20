@@ -1,28 +1,42 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import {
   isToolUIPart,
   lastAssistantMessageIsCompleteWithToolCalls,
   type UIMessage,
 } from "ai";
-import { Bot, Send, Sparkles, Square } from "lucide-react";
+import { Bot, Send, Sparkles, Square, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { type ServerSnapshot } from "@/lib/ipc";
 import {
   createAgentTransport,
   executeClientTool,
-  TOOL_LABELS,
   type AgentToolContext,
 } from "@/lib/agent";
+import type { ToolPart } from "@/lib/agent-types";
+import { MarkdownContent } from "@/components/MarkdownContent";
+import { AgentToolBadge } from "@/components/AgentToolBadge";
+import { AgentHistorySidebar } from "@/components/AgentHistorySidebar";
+import {
+  createConversation,
+  deleteConversation,
+  getActiveConversationId,
+  listConversations,
+  loadConversation,
+  saveConversation,
+  setActiveConversationId,
+  toUIMessages,
+  type StoredConversation,
+} from "@/lib/conversation-store";
 
-interface ToolPart {
-  type: string;
-  state: "input-streaming" | "input-available" | "output-available" | "output-error";
-  toolCallId: string;
-  toolName: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
+const SIDEBAR_COLLAPSED_KEY = "csspeak.agent.sidebarCollapsed";
+
+interface CsAgentPanelProps {
+  endpoint: string;
+  accessToken?: string;
+  connected: boolean;
+  snapshot: ServerSnapshot | null;
 }
 
 function isToolPart(part: unknown): part is ToolPart {
@@ -35,23 +49,12 @@ function isToolPart(part: unknown): part is ToolPart {
   );
 }
 
-const QUICK_PROMPTS = [
-  "分析一下今天的大盘走势",
-  "看看热门饰品有哪些搬砖价差",
-  "查一下 AK-47 | 红线（久经沙场）的价格",
-  "在频道发个整活消息活跃一下气氛",
-];
-
-/// Translate a raw Error/JSON from useChat into a user-friendly message with
-/// an actionable hint. Covers WebKit network failures, 401 auth rejections,
-/// and upstream LLM errors forwarded by the Worker.
+/// Translate a raw Error/JSON from useChat into a user-friendly message.
 function describeError(err: unknown): { message: string; hint?: string } {
   if (!err) return { message: "未知错误" };
 
   const raw = err instanceof Error ? err.message : String(err);
 
-  // The AI SDK transport reads response.text() on non-2xx and throws it as
-  // the error message. Try to parse it as a Worker JSON error first.
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
@@ -69,10 +72,9 @@ function describeError(err: unknown): { message: string; hint?: string } {
       if (msg) return { message: msg };
     }
   } catch {
-    // not JSON, continue with string matching below
+    // not JSON
   }
 
-  // Auth errors (Worker returns 401; body may or may not be readable in WebKit)
   if (
     raw.includes("401") ||
     raw.includes("UNAUTHORIZED") ||
@@ -85,7 +87,6 @@ function describeError(err: unknown): { message: string; hint?: string } {
     };
   }
 
-  // Worker-side forwarded errors prefixed with [CODE]
   const m = raw.match(/^\[(\w+)\]\s*(.*)/);
   if (m) {
     const [, code, detail] = m;
@@ -109,7 +110,6 @@ function describeError(err: unknown): { message: string; hint?: string } {
     }
   }
 
-  // WebKit/Safari generic network failures — CORS rejection, DNS, Worker down.
   if (raw === "Load failed" || raw === "Failed to fetch" || raw.includes("NetworkError")) {
     return {
       message: "无法连接到 Agent 服务",
@@ -117,44 +117,136 @@ function describeError(err: unknown): { message: string; hint?: string } {
     };
   }
 
-  // Fallback: show the raw message, truncated if very long.
   return {
     message: raw.length > 120 ? raw.slice(0, 120) + "…" : raw,
   };
 }
+
+const QUICK_PROMPTS = [
+  "分析一下今天的大盘走势",
+  "看看热门饰品有哪些搬砖价差",
+  "查一下 AK-47 | 红线（久经沙场）的价格",
+  "帮我算一下这个库存值多少钱",
+  "查一下我的 Steam 库存",
+  "在频道发个整活消息活跃一下气氛",
+];
 
 export function CsAgentPanel({
   endpoint,
   accessToken,
   connected,
   snapshot,
-}: {
+}: CsAgentPanelProps) {
+  const [conversations, setConversations] = useState<StoredConversation[]>(() =>
+    listConversations(),
+  );
+  const [activeId, setActiveId] = useState<string>(() => {
+    const saved = getActiveConversationId();
+    return saved && loadConversation(saved) ? saved : createConversation();
+  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  };
+
+  const refreshConversations = () => setConversations(listConversations());
+
+  const handleNew = () => {
+    const id = createConversation();
+    setActiveConversationId(id);
+    setActiveId(id);
+    refreshConversations();
+  };
+
+  const handleSelect = (id: string) => {
+    setActiveConversationId(id);
+    setActiveId(id);
+    refreshConversations();
+  };
+
+  const handleDelete = (id: string) => {
+    deleteConversation(id);
+    refreshConversations();
+    if (activeId === id) {
+      const remaining = listConversations();
+      const next = remaining[0]?.id ?? createConversation();
+      setActiveId(next);
+      setActiveConversationId(next);
+    }
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1">
+      <AgentHistorySidebar
+        conversations={conversations}
+        activeId={activeId}
+        collapsed={sidebarCollapsed}
+        onSelect={handleSelect}
+        onNew={handleNew}
+        onDelete={handleDelete}
+        onToggleCollapse={toggleSidebar}
+      />
+      <AgentChat
+        key={activeId}
+        conversationId={activeId}
+        endpoint={endpoint}
+        accessToken={accessToken}
+        connected={connected}
+        snapshot={snapshot}
+        onConversationsChange={refreshConversations}
+      />
+    </div>
+  );
+}
+
+interface AgentChatProps {
+  conversationId: string;
   endpoint: string;
   accessToken?: string;
   connected: boolean;
   snapshot: ServerSnapshot | null;
-}) {
+  onConversationsChange: () => void;
+}
+
+function AgentChat({
+  conversationId,
+  endpoint,
+  accessToken,
+  connected,
+  snapshot,
+  onConversationsChange,
+}: AgentChatProps) {
   const transport = useMemo(
     () => createAgentTransport(endpoint, accessToken),
     [endpoint, accessToken],
   );
 
-  // The AI SDK calls `sendAutomaticallyWhen` from both `addToolOutput` and the
-  // end of `makeRequest`. When the last tool output completes, both can return
-  // true in the same tick and fire two identical requests, causing duplicated
-  // assistant messages on screen. This ref deduplicates by remembering the set
-  // of completed tool calls we have already auto-submitted for.
-  const autoSentToolCallsRef = useRef<string | null>(null);
+  const initialMessages = useMemo(() => {
+    const conv = loadConversation(conversationId);
+    return conv ? toUIMessages(conv) : [];
+  }, [conversationId]);
 
+  const autoSentToolCallsRef = useRef<string | null>(null);
   const sendAutomaticallyWhen = useMemo(() => {
     return ({ messages }: { messages: UIMessage[] }): boolean => {
       if (!lastAssistantMessageIsCompleteWithToolCalls({ messages })) {
         return false;
       }
-
       const lastMessage = messages[messages.length - 1];
       if (lastMessage?.role !== "assistant") return false;
-
       const completedToolKey = lastMessage.parts
         .filter(
           (p) =>
@@ -165,7 +257,6 @@ export function CsAgentPanel({
         .map((p) => (p as { toolCallId: string }).toolCallId)
         .sort()
         .join(",");
-
       if (autoSentToolCallsRef.current === completedToolKey) {
         return false;
       }
@@ -174,13 +265,12 @@ export function CsAgentPanel({
     };
   }, []);
 
-  // Keep the latest TS context in a ref so the stable onToolCall closure can
-  // always read the current connection/snapshot state.
   const ctxRef = useRef<AgentToolContext>({ connected, snapshot, accessToken });
   ctxRef.current = { connected, snapshot, accessToken };
 
   const { messages, sendMessage, status, stop, error, addToolOutput } = useChat({
     transport,
+    messages: initialMessages,
     sendAutomaticallyWhen,
     async onToolCall({ toolCall }) {
       if (toolCall.dynamic) return;
@@ -197,23 +287,35 @@ export function CsAgentPanel({
         });
       }
     },
+    onFinish: () => {
+      saveConversation(conversationId, messages);
+      onConversationsChange();
+    },
   });
+
+  // Persist messages as the conversation evolves.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const timeout = setTimeout(() => {
+      saveConversation(conversationId, messages);
+      onConversationsChange();
+    }, 500);
+    return () => clearTimeout(timeout);
+  }, [messages, conversationId, onConversationsChange]);
 
   const busy = status === "submitted" || status === "streaming";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Connection hint */}
-      <div className="flex items-center gap-2 border-b border-border px-4 py-1.5">
-        <Bot className="size-3.5 text-primary" />
-        <span className="text-xs text-muted-foreground">
-          {connected
-            ? "已连接 TS 服务器，可发送频道消息/戳人"
-            : "未连接 TS 服务器，仅可使用市场分析功能"}
-        </span>
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+        <div className="flex items-center gap-2">
+          <Bot className="size-4 text-primary" />
+          <span className="font-semibold">CS Agent</span>
+          <span className="text-xs text-muted-foreground">市场分析 · 频道互动</span>
+        </div>
+        <EndpointStatus endpoint={endpoint} />
       </div>
 
-      {/* Messages */}
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
         {messages.length === 0 && (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
@@ -223,54 +325,51 @@ export function CsAgentPanel({
             <div>
               <div className="font-semibold">CS Agent</div>
               <p className="mt-1 max-w-xs text-sm text-muted-foreground">
-                你的 CS2 饰品市场分析师 & 频道整活助手。试试：
+                你的 CS2 饰品市场分析师 & 频道整活助手。
               </p>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              {QUICK_PROMPTS.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => sendMessage({ text: p })}
-                  className="rounded-lg border border-border bg-card px-3 py-1.5 text-left text-sm transition-colors hover:border-ring"
-                >
-                  {p}
-                </button>
-              ))}
             </div>
           </div>
         )}
 
-        {messages.map((m) => (
-          <div
-            key={m.id}
-            className={cn(
-              "flex flex-col gap-1",
-              m.role === "user" ? "items-end" : "items-start",
-            )}
-          >
-            {m.parts.map((part, i) => {
-              if (part.type === "text" && part.text) {
-                return (
-                  <div
-                    key={i}
-                    className={cn(
-                      "max-w-[80%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
-                      m.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-card border border-border",
-                    )}
-                  >
-                    {part.text}
-                  </div>
-                );
-              }
-              if (isToolPart(part)) {
-                return <ToolBadge key={i} part={part} />;
-              }
-              return null;
-            })}
-          </div>
-        ))}
+        <AnimatePresence initial={false}>
+          {messages.map((m) => (
+            <motion.div
+              key={m.id}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={cn(
+                "flex flex-col gap-1",
+                m.role === "user" ? "items-end" : "items-start",
+              )}
+            >
+              {m.parts.map((part, i) => {
+                if (part.type === "text" && part.text) {
+                  return (
+                    <div
+                      key={i}
+                      className={cn(
+                        "min-w-0 max-w-[80%] rounded-lg px-3 py-2 text-sm break-words",
+                        m.role === "user"
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-card border border-border",
+                      )}
+                    >
+                      <MarkdownContent>{part.text}</MarkdownContent>
+                    </div>
+                  );
+                }
+                if (isToolPart(part)) {
+                  return (
+                    <div key={i} className="min-w-0 max-w-[min(90%,32rem)]">
+                      <AgentToolBadge part={part} />
+                    </div>
+                  );
+                }
+                return null;
+              })}
+            </motion.div>
+          ))}
+        </AnimatePresence>
 
         {busy && (
           <div className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
@@ -286,52 +385,93 @@ export function CsAgentPanel({
         {error && <ErrorBanner error={error} noToken={!accessToken} />}
       </div>
 
-      {/* Input */}
-      <form
-        className="flex items-center gap-2 border-t border-border p-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const input = e.currentTarget.elements.namedItem("msg") as HTMLInputElement;
-          const text = input.value.trim();
-          if (!text || busy) return;
-          sendMessage({ text });
-          input.value = "";
-        }}
-      >
-        <input
-          name="msg"
-          placeholder="问问 CS Agent…"
-          className="h-9 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-ring"
-        />
-        {busy ? (
-          <button
-            type="button"
-            onClick={stop}
-            className="flex h-9 items-center gap-1.5 rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-accent"
-          >
-            <Square className="size-3.5" />
-            停止
-          </button>
-        ) : (
-          <button
-            type="submit"
-            className="flex h-9 items-center gap-1.5 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground disabled:opacity-50"
-          >
-            <Send className="size-3.5" />
-            发送
-          </button>
+      <div className="flex shrink-0 flex-col gap-2 border-t border-border p-3">
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {QUICK_PROMPTS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              disabled={busy}
+              onClick={() => sendMessage({ text: p })}
+              className="shrink-0 rounded-full border border-border bg-accent/50 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const input = e.currentTarget.elements.namedItem("msg") as HTMLInputElement;
+            const text = input.value.trim();
+            if (!text || busy) return;
+            sendMessage({ text });
+            input.value = "";
+          }}
+        >
+          <input
+            name="msg"
+            placeholder="问问 CS Agent…"
+            className="h-9 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-ring"
+          />
+          {busy ? (
+            <button
+              type="button"
+              onClick={stop}
+              className="flex shrink-0 h-9 items-center gap-1.5 rounded-md border border-border px-3 text-sm text-muted-foreground hover:bg-accent"
+            >
+              <Square className="size-3.5" />
+              停止
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="flex shrink-0 h-9 items-center gap-1.5 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            >
+              <Send className="size-3.5" />
+              发送
+            </button>
+          )}
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EndpointStatus({ endpoint }: { endpoint: string }) {
+  const [ok, setOk] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setOk(null);
+    fetch(endpoint, { method: "HEAD", mode: "no-cors" })
+      .then(() => {
+        if (!cancelled) setOk(true);
+      })
+      .catch(() => {
+        if (!cancelled) setOk(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [endpoint]);
+
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-muted-foreground" title={endpoint}>
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          ok === true ? "bg-green-500" : ok === false ? "bg-destructive" : "bg-muted-foreground/50 animate-pulse",
         )}
-      </form>
+      />
+      <span className="max-w-[160px] truncate">{endpoint.replace(/^https?:\/\//, "")}</span>
     </div>
   );
 }
 
 function ErrorBanner({ error, noToken }: { error: unknown; noToken?: boolean }) {
   let { message, hint } = describeError(error);
-
-  // If the token is empty and we got a network-level error, the most likely
-  // cause is a 401 that WebKit couldn't surface (it masks the response body
-  // behind "Load failed"). Override the hint to guide the user to fill the token.
   if (noToken && (message.includes("无法连接") || message.includes("Load failed"))) {
     message = "可能缺少访问令牌";
     hint = "后端已启用访问控制。请打开「设置 → CS Agent → 访问令牌」填写正确的令牌。";
@@ -340,56 +480,10 @@ function ErrorBanner({ error, noToken }: { error: unknown; noToken?: boolean }) 
   return (
     <div className="flex flex-col gap-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
       <div className="flex items-center gap-1.5">
-        <span>✕</span>
+        <X className="size-3.5 shrink-0" />
         <span className="font-medium">{message}</span>
       </div>
       {hint && <p className="text-destructive/80">{hint}</p>}
-    </div>
-  );
-}
-
-function ToolBadge({ part }: { part: ToolPart }) {
-  const label = TOOL_LABELS[part.toolName] ?? part.toolName;
-  const done = part.state === "output-available";
-  const failed = part.state === "output-error";
-  const loading =
-    part.state === "input-streaming" || part.state === "input-available";
-
-  // Extract a human-readable detail line from the tool result or error.
-  let detail: string | null = null;
-  if (done && part.output && typeof part.output === "object") {
-    const out = part.output as Record<string, unknown>;
-    if (out.error) detail = String(out.error);
-    else if (out.success) detail = "✓ 已执行";
-  }
-  if (failed && part.errorText) {
-    detail = part.errorText;
-  }
-
-  return (
-    <div
-      className={cn(
-        "flex flex-col gap-0.5 rounded-md border px-2 py-1 text-xs",
-        failed
-          ? "border-destructive/30 bg-destructive/5 text-destructive"
-          : done
-            ? "border-border bg-accent/50 text-muted-foreground"
-            : "border-border bg-card text-muted-foreground",
-      )}
-    >
-      <div className="flex items-center gap-1.5">
-        <span>{loading ? "⏳" : failed ? "✕" : "🔧"}</span>
-        <span>
-          {label}
-          {loading && "…"}
-        </span>
-        {detail && !failed && (
-          <span className="text-muted-foreground">· {detail}</span>
-        )}
-      </div>
-      {failed && detail && (
-        <span className="pl-5 text-destructive/80">{detail}</span>
-      )}
     </div>
   );
 }

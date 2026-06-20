@@ -12,11 +12,12 @@ name: build
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 0.1.2)"
+        required: true
 
 jobs:
   macos:
@@ -54,6 +55,16 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
+
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          node .github/scripts/bump-version.cjs "$VERSION"
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -104,6 +115,16 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
+
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          node .github/scripts/bump-version.cjs "$VERSION"
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -160,6 +181,16 @@ jobs:
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
+
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          node .github/scripts/bump-version.cjs "$VERSION"
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile

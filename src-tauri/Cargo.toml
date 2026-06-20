@@ -1,6 +1,6 @@
 [package]
 name = "csspeak"
-version = "0.1.0"
+version = "0.2.0"
 description = "csspeak — a custom TeamSpeak 3 voice client"
 authors = ["you"]
 edition = "2021"

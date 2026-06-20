@@ -108,8 +108,8 @@ export interface ChatMessage {
   message: string;
 }
 
-export function sendChat(target: string, message: string) {
-  return invoke("send_chat", { target, message });
+export function sendChat(target: string, message: string, clientId?: number) {
+  return invoke("send_chat", { target, message, clientId: clientId ?? null });
 }
 
 export function joinChannelPw(channel: number, password: string) {

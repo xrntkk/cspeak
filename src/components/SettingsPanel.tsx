@@ -126,10 +126,12 @@ export function SettingsPanel({
   settings,
   onChange,
   onClose,
+  inline = false,
 }: {
   settings: AudioSettings;
   onChange: (next: AudioSettings) => void;
-  onClose: () => void;
+  onClose?: () => void;
+  inline?: boolean;
 }) {
   const [inputs, setInputs] = useState<string[]>([]);
   const [outputs, setOutputs] = useState<string[]>([]);
@@ -217,28 +219,31 @@ export function SettingsPanel({
 
   const patch = (p: Partial<AudioSettings>) => onChange({ ...settings, ...p });
 
-  return (
+  const panel = (
     <div
-      className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
+      className={cn(
+        "flex flex-col overflow-hidden bg-card",
+        inline ? "min-h-0 flex-1 rounded-none border-0" : "max-h-full w-[28rem] max-w-full rounded-lg border border-border shadow-xl",
+      )}
+      onClick={(e) => e.stopPropagation()}
     >
-      <div
-        className="flex max-h-full w-[28rem] max-w-full flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+      {!inline && (
         <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
           <SettingsIcon className="size-4 text-muted-foreground" />
           <span className="font-semibold">设置</span>
           <div className="flex-1" />
-          <button
-            onClick={onClose}
-            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <X className="size-4" />
+            </button>
+          )}
         </header>
+      )}
 
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
           <Section icon={<Volume2 className="size-3.5" />} title="设备">
             <Row label="输入设备(麦克风)">
               <select
@@ -658,6 +663,16 @@ export function SettingsPanel({
           </Section>
         </div>
       </div>
+  );
+
+  if (inline) return panel;
+
+  return (
+    <div
+      className="absolute inset-0 z-10 flex items-center justify-center overflow-hidden bg-black/50 p-4"
+      onClick={onClose}
+    >
+      {panel}
     </div>
   );
 }

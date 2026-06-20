@@ -111,3 +111,15 @@
     overflow: hidden;
   }
 }
+
+.markdown {
+  line-height: 1.6;
+}
+
+.markdown-compact {
+  display: inline;
+}
+
+.markdown-compact p {
+  margin: 0;
+}

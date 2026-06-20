@@ -173,9 +173,9 @@ fn upload_file(
 }
 
 #[tauri::command]
-fn send_chat(state: tauri::State<AppState>, target: String, message: String) {
+fn send_chat(state: tauri::State<AppState>, target: String, message: String, client_id: Option<u16>) {
     if let Some(conn) = state.conn.lock().unwrap().as_ref() {
-        conn.send(Cmd::SendChat { target, message });
+        conn.send(Cmd::SendChat { target, message, client: client_id });
     }
 }
 

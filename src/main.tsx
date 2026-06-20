@@ -2,11 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
+import { applyTheme, getInitialThemeMode } from "./hooks/use-theme";
 
-// Apply persisted theme before first paint (default light).
-if (localStorage.getItem("csspeak.theme") === "dark") {
-  document.documentElement.classList.add("dark");
-}
+// Apply persisted theme before first paint.
+applyTheme(getInitialThemeMode());
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },

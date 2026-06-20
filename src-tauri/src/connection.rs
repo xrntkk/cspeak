@@ -54,7 +54,7 @@ pub enum Cmd {
         path: String,
         file: PathBuf,
     },
-    SendChat { target: String, message: String },
+    SendChat { target: String, message: String, client: Option<u16> },
     JoinChannelPw { channel: u64, password: String },
     Poke { client: u16, message: String },
     KickClient { client: u16, message: String, from_server: bool },
@@ -426,9 +426,17 @@ async fn run_session(
                     }
                 }
             }
-            Item::Command(Some(Cmd::SendChat { target, message })) => {
+            Item::Command(Some(Cmd::SendChat { target, message, client })) => {
                 let tgt = match target.as_str() {
                     "server" => MessageTarget::Server,
+                    "private" => {
+                        if let Some(id) = client {
+                            MessageTarget::Client(ClientId(id))
+                        } else {
+                            tracing::warn!("private message without client id");
+                            continue;
+                        }
+                    }
                     _ => MessageTarget::Channel,
                 };
                 match con.get_state() {
