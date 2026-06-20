@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::prelude::*;
 use tauri::{AppHandle, Emitter};
-use tokio::{fs as tokio_fs, io as tokio_io, sync::mpsc};
+use tokio::{io as tokio_io, sync::mpsc};
 
 use tsclientlib::data::{Channel, Client};
 use tsclientlib::messages::{c2s, s2c::InMessage};
@@ -400,7 +400,7 @@ async fn run_session(
                     tracing::warn!(%e, "failed to request file list");
                 }
             }
-            Item::Command(Some(Cmd::DownloadFile { channel, path, save_to })) => {
+            Item::Command(Some(Cmd::DownloadFile { channel, path, save_to: _ })) => {
                 match con.download_file(ChannelId(channel), &path, None, None) {
                     Ok(_handle) => { /* event comes later */ }
                     Err(e) => {

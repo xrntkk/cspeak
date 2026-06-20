@@ -50,7 +50,7 @@ mod enhance_impl {
                 }),
                 _ => None,
             };
-            self.proc.set_config(&config::Config {
+            self.proc.set_config(config::Config {
                 high_pass_filter: Some(config::HighPassFilter { apply_in_full_band: true }),
                 echo_canceller: Some(config::EchoCanceller::default()),
                 noise_suppression: ns,
@@ -89,7 +89,7 @@ mod enhance_impl {
         pub fn process(&mut self, frame: &mut [f32]) {
             use ndarray::{ArrayView2, ArrayViewMut2};
             let noisy = frame.to_vec();
-            let (Ok(noisy), Ok(mut enh)) = (
+            let (Ok(noisy), Ok(enh)) = (
                 ArrayView2::from_shape((1, frame.len()), &noisy),
                 ArrayViewMut2::from_shape((1, frame.len()), frame),
             ) else { return };

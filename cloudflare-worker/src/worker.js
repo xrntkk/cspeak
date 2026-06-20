@@ -293,15 +293,19 @@ export default {
       }
     }
 
-    // ---- Market proxy endpoints (cached) ----
+    // ---- Market proxy endpoints (cached, access-controlled) ----
 
     // GET /trend  →  SteamDT broad/v1/index (5 min cache)
     if (url.pathname === "/trend") {
+      const denied = checkAccess(request, env);
+      if (denied) return denied;
       return proxyGet(env, `${BASE}/open/cs2/broad/v1/index`, ttl(TTL.index));
     }
 
     // GET /price?marketHashName=  →  SteamDT /price/single (1 min cache)
     if (url.pathname === "/price") {
+      const denied = checkAccess(request, env);
+      if (denied) return denied;
       const h = url.searchParams.get("marketHashName");
       if (!h) return json({ success: false, error: "missing marketHashName" }, 400);
       return proxyGet(env, `${BASE}/open/cs2/v1/price/single?marketHashName=${encodeURIComponent(h)}`, ttl(TTL.price));
@@ -309,6 +313,8 @@ export default {
 
     // GET /kline?marketHashName=&platform=&type=  →  SteamDT /item/v1/kline (5 min cache)
     if (url.pathname === "/kline") {
+      const denied = checkAccess(request, env);
+      if (denied) return denied;
       const mh = url.searchParams.get("marketHashName");
       const pf = url.searchParams.get("platform") || "YOUPIN";
       const tp = url.searchParams.get("type") || "1";
@@ -319,6 +325,8 @@ export default {
 
     // GET /hotlist  →  public web skin/market/v1/list (10 min cache, no auth)
     if (url.pathname === "/hotlist") {
+      const denied = checkAccess(request, env);
+      if (denied) return denied;
       const body = JSON.stringify({ sortType: 1, pageSize: 100 });
       const key = new Request(`https://hotlist`, { method: "GET" });
       // Build a deduplicated cache key from the body.
