@@ -79,6 +79,7 @@ import {
   AnnouncementTag,
   AnnouncementTitle,
 } from "@/components/ui/announcement";
+import { Tiles } from "@/components/ui/tiles";
 
 const DEFAULT_SETTINGS: AudioSettings = {
   inputDevice: null,
@@ -468,9 +469,12 @@ function ConnectForm({
   onRemoveBookmark: (address: string) => void;
 }) {
   return (
-    <div className="flex flex-1 items-center justify-center">
+    <div className="relative flex flex-1 items-center justify-center overflow-hidden">
+      <div className="absolute inset-0 opacity-[0.18] dark:opacity-[0.12]">
+        <Tiles rows={60} cols={10} tileSize="md" />
+      </div>
       <form
-        className="flex w-80 flex-col gap-3 rounded-lg border border-border bg-card p-6"
+        className="relative z-10 flex w-80 flex-col gap-3 rounded-lg border border-border bg-card p-6 shadow-sm"
         onSubmit={(e) => {
           e.preventDefault();
           onConnect();
