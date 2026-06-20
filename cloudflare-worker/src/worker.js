@@ -324,8 +324,6 @@ export default {
     }
 
     if (url.pathname === "/base") {
-      const denied = checkAccess(request, env);
-      if (denied) return denied;
       const cached = await env.MARKET_CACHE.get(KV_KEY);
       const ts = await env.MARKET_CACHE.get(KV_TS_KEY);
       if (!cached) {
@@ -363,15 +361,11 @@ export default {
 
     // GET /trend  →  SteamDT broad/v1/index (5 min cache)
     if (url.pathname === "/trend") {
-      const denied = checkAccess(request, env);
-      if (denied) return denied;
       return proxyGet(env, `${BASE}/open/cs2/broad/v1/index`, ttl(TTL.index));
     }
 
     // GET /price?marketHashName=  →  SteamDT /price/single (1 min cache)
     if (url.pathname === "/price") {
-      const denied = checkAccess(request, env);
-      if (denied) return denied;
       const h = url.searchParams.get("marketHashName");
       if (!h) return json({ success: false, error: "missing marketHashName" }, 400);
       return proxyGet(env, `${BASE}/open/cs2/v1/price/single?marketHashName=${encodeURIComponent(h)}`, ttl(TTL.price));
@@ -379,8 +373,6 @@ export default {
 
     // GET /kline?marketHashName=&platform=&type=  →  SteamDT /item/v1/kline (5 min cache)
     if (url.pathname === "/kline") {
-      const denied = checkAccess(request, env);
-      if (denied) return denied;
       const mh = url.searchParams.get("marketHashName");
       const pf = url.searchParams.get("platform") || "YOUPIN";
       const tp = url.searchParams.get("type") || "1";
