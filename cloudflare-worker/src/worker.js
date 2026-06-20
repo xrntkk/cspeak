@@ -12,16 +12,7 @@
 // Optional env:
 //   AGENT_MODEL     — model id (default: gpt-4o-mini)
 
-import {
-  streamText,
-  tool,
-  isStepCount,
-  convertToModelMessages,
-  createUIMessageStreamResponse,
-  toUIMessageStream,
-} from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
-import { z } from "zod";
+// Direct SSE proxy to EvoMap — no AI SDK wrappers, simple and reliable.
 
 const BASE = "https://open.steamdt.com";
 const WEB_BASE = "https://www.steamdt.com/api";
@@ -81,79 +72,7 @@ const SYSTEM_PROMPT = `你是 CS Agent，一个集成在 csspeak（CS2 玩家的
 
 ## 注意事项
 - 如果用户要求频道互动但未连接 TS 服务器，请提示需要先在「语音」页连接
-- 始终使用简体中文回复
 - 数据来源于 SteamDT，可能存在延迟，重要决策请以平台实时数据为准`;
-
-/// All tools are client-side (no `execute`): the model emits a tool call, the
-/// csspeak desktop client executes it via Tauri IPC and returns the result.
-const agentTools = {
-  getMarketIndex: tool({
-    description:
-      "获取 CS2 饰品大盘指数，包含当前指数、较昨日涨跌幅和近期历史走势。当用户询问大盘走势、市场整体表现时调用。",
-    inputSchema: z.object({}),
-  }),
-  searchItems: tool({
-    description:
-      "按关键词搜索 CS2 饰品目录，返回匹配的饰品名称(name)和 marketHashName。当用户想找某件饰品或查询价格前，先调用此工具获取 marketHashName。",
-    inputSchema: z.object({
-      keyword: z.string().describe("搜索关键词，例如饰品名称「AK-47 | 红线」"),
-    }),
-  }),
-  getHotList: tool({
-    description:
-      "获取 CS2 饰品热门榜单，包含各平台最低价、最高价和跨平台价差百分比。当用户想看热门饰品、涨幅排行、搬砖价差时调用。",
-    inputSchema: z.object({}),
-  }),
-  getItemPrice: tool({
-    description:
-      "查询指定饰品在各大平台（YOUPIN/BUFF/C5/STEAM）的挂刀价(sellPrice)和求购价(biddingPrice)。需要先通过 searchItems 获取 marketHashName。",
-    inputSchema: z.object({
-      marketHashName: z
-        .string()
-        .describe("饰品的 marketHashName，可通过 searchItems 获取"),
-    }),
-  }),
-  getItemKline: tool({
-    description:
-      "查询指定饰品的K线（蜡烛图）数据用于价格走势分析。klineType: 1=日K, 2=周K, 3=月K。platform: YOUPIN/BUFF/C5/STEAM。",
-    inputSchema: z.object({
-      marketHashName: z.string(),
-      platform: z.string().describe("平台：YOUPIN / BUFF / C5 / STEAM"),
-      klineType: z.string().describe("1=日K, 2=周K, 3=月K"),
-    }),
-  }),
-  sendChannelMessage: tool({
-    description:
-      "向当前所在的 TeamSpeak 频道发送文字消息。可用于分享分析结果、发送整活内容、发表情等。需要已连接 TS 服务器。",
-    inputSchema: z.object({
-      message: z.string().describe("要发送的消息内容，支持纯文本和 URL"),
-    }),
-  }),
-  sendServerMessage: tool({
-    description:
-      "向 TeamSpeak 服务器全局发送文字消息（所有频道可见）。需要已连接 TS 服务器。请谨慎使用，避免刷屏。",
-    inputSchema: z.object({
-      message: z.string().describe("要发送的消息内容"),
-    }),
-  }),
-  pokeClient: tool({
-    description:
-      "戳一下(poke)指定的 TeamSpeak 用户，对方会收到一条弹窗提示。需要已连接 TS 服务器。戳人前建议先调用 listOnlineClients 确认昵称。",
-    inputSchema: z.object({
-      clientName: z.string().describe("目标用户的昵称（需与在线列表中的完全一致）"),
-      message: z.string().describe("戳的内容"),
-    }),
-  }),
-  listChannels: tool({
-    description: "列出当前 TeamSpeak 服务器上的所有频道。需要已连接 TS 服务器。",
-    inputSchema: z.object({}),
-  }),
-  listOnlineClients: tool({
-    description:
-      "列出当前 TeamSpeak 服务器上所有在线用户及其所在频道。需要已连接 TS 服务器。",
-    inputSchema: z.object({}),
-  }),
-};
 
 // ---------------------------------------------------------------------------
 // Access control
@@ -182,70 +101,54 @@ function checkAccess(request, env) {
 
 async function handleAgent(request, env) {
   if (!env.EVOMAP_API_KEY) {
-    return json(
-      {
-        error: "服务端未配置 EVOMAP_API_KEY，请联系管理员",
-        code: "MISSING_API_KEY",
-      },
-      500,
-    );
+    return json({ error: "EVOMAP_API_KEY not configured" }, 500);
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return json(
-      { error: "请求体不是合法的 JSON", code: "BAD_REQUEST" },
-      400,
-    );
+    return json({ error: "invalid JSON" }, 400);
   }
 
   const messages = body.messages;
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return json(
-      { error: "messages 字段为空或格式不正确", code: "BAD_REQUEST" },
-      400,
-    );
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return json({ error: "messages required" }, 400);
   }
 
-  // EvoMap exposes an OpenAI-compatible API, so we reuse the OpenAI provider
-  // with a custom baseURL. The API key lives ONLY in the Worker secret — it is
-  // never shipped to the client, embedded in the bundle, or committed to git.
-  const provider = createOpenAI({
-    apiKey: env.EVOMAP_API_KEY,
-    baseURL: "https://api.evomap.ai/v1",
+  // Direct SSE proxy to EvoMap — more reliable than the AI SDK wrapper.
+  const evoBody = JSON.stringify({
+    model: env.AGENT_MODEL || "evomap-deepseek-v4-flash",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...messages,
+    ],
+    stream: true,
+    max_tokens: 4096,
   });
-  const modelId = env.AGENT_MODEL || "evomap-deepseek-v4-flash";
 
-  let result;
-  try {
-    result = streamText({
-      model: provider(modelId),
-      system: SYSTEM_PROMPT,
-      messages: await convertToModelMessages(messages),
-      stopWhen: isStepCount(8),
-      tools: agentTools,
-    });
-  } catch (e) {
-    return json(
-      {
-        error: `模型初始化失败：${e instanceof Error ? e.message : String(e)}`,
-        code: "MODEL_INIT_FAILED",
-      },
-      500,
-    );
+  const upstream = await fetch("https://api.evomap.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.EVOMAP_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: evoBody,
+  });
+
+  if (!upstream.ok) {
+    const err = await upstream.text();
+    return json({ error: `upstream ${upstream.status}: ${err.slice(0, 200)}` }, 502);
   }
 
-  return createUIMessageStreamResponse({
-    stream: toUIMessageStream({
-      stream: result.stream,
-      onError: (error) => {
-        // Translate common upstream errors into actionable Chinese messages
-        // so the desktop client can surface them directly.
-        return describeStreamError(error);
-      },
-    }),
+  // Stream the response back to the client as-is (SSE).
+  return new Response(upstream.body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      ...CORS,
+    },
   });
 }
 
