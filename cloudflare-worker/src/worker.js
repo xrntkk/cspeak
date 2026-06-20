@@ -24,13 +24,24 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 
 const BASE = "https://open.steamdt.com";
+const WEB_BASE = "https://www.steamdt.com/api";
 const KV_KEY = "base_items";
 const KV_TS_KEY = "base_items_ts";
+
+// Cache TTLs (seconds). The origin responses are already time-bucketed
+// (kline candles don't change intra-day, prices refresh ~1/min), so we
+// can be generous on the edge to keep latency low.
+const TTL = {
+  index:  300,  // broad index — 5 min
+  price:   60,  // single-item multi-platform price — 1 min
+  kline:  300,  // OHLC candles — 5 min
+  hotlist: 600, // public hot-list page — 10 min
+};
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
 // ---------------------------------------------------------------------------
@@ -282,13 +293,106 @@ export default {
       }
     }
 
+    // ---- Market proxy endpoints (cached) ----
+
+    // GET /trend  →  SteamDT broad/v1/index (5 min cache)
+    if (url.pathname === "/trend") {
+      return proxyGet(env, `${BASE}/open/cs2/broad/v1/index`, ttl(TTL.index));
+    }
+
+    // GET /price?marketHashName=  →  SteamDT /price/single (1 min cache)
+    if (url.pathname === "/price") {
+      const h = url.searchParams.get("marketHashName");
+      if (!h) return json({ success: false, error: "missing marketHashName" }, 400);
+      return proxyGet(env, `${BASE}/open/cs2/v1/price/single?marketHashName=${encodeURIComponent(h)}`, ttl(TTL.price));
+    }
+
+    // GET /kline?marketHashName=&platform=&type=  →  SteamDT /item/v1/kline (5 min cache)
+    if (url.pathname === "/kline") {
+      const mh = url.searchParams.get("marketHashName");
+      const pf = url.searchParams.get("platform") || "YOUPIN";
+      const tp = url.searchParams.get("type") || "1";
+      if (!mh) return json({ success: false, error: "missing marketHashName" }, 400);
+      const body = JSON.stringify({ marketHashName: mh, platform: pf, type: tp });
+      return proxyPost(env, `${BASE}/open/cs2/item/v1/kline`, body, ttl(TTL.kline));
+    }
+
+    // GET /hotlist  →  public web skin/market/v1/list (10 min cache, no auth)
+    if (url.pathname === "/hotlist") {
+      const body = JSON.stringify({ sortType: 1, pageSize: 100 });
+      const key = new Request(`https://hotlist`, { method: "GET" });
+      // Build a deduplicated cache key from the body.
+      const cacheUrl = new URL(request.url);
+      cacheUrl.search = ""; // normalise
+      const cacheReq = new Request(cacheUrl, { method: "GET" });
+      let cached = await caches.default.match(cacheReq);
+      if (cached) return cached;
+
+      const resp = await fetch(`${WEB_BASE}/skin/market/v1/list`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Language": "zh_CN" },
+        body,
+      });
+      if (!resp.ok) return json({ success: false, error: `upstream ${resp.status}` }, 502);
+      const copy = new Response(resp.body, resp);
+      copy.headers.set("Cache-Control", `public, max-age=${TTL.hotlist}`);
+      copy.headers.set("Access-Control-Allow-Origin", "*");
+      ctx.waitUntil(caches.default.put(cacheReq, copy.clone()));
+      return copy;
+    }
+
     return json({
       success: true,
       service: "csspeak-market",
-      endpoints: ["/base", "/refresh", "/agent (POST)"],
+      endpoints: ["/base", "/refresh", "/agent (POST)", "/trend", "/price", "/kline", "/hotlist"],
     });
   },
 };
+
+// ---------------------------------------------------------------------------
+// Market proxy helpers (cached)
+// ---------------------------------------------------------------------------
+
+function ttl(sec) {
+  return `public, max-age=${sec}, s-maxage=${sec}`;
+}
+
+/// Simple Cache-Aside: match → fetch + cache → return.
+async function cacheThrough(cacheReq, fetchFn, ttlStr) {
+  let cached = await caches.default.match(cacheReq);
+  if (cached) return cached;
+  const upstream = await fetchFn();
+  if (!upstream.ok) return null;
+  const resp = new Response(upstream.body, upstream);
+  resp.headers.set("Cache-Control", ttlStr);
+  resp.headers.set("Access-Control-Allow-Origin", "*");
+  caches.default.put(cacheReq, resp.clone());
+  return resp;
+}
+
+async function proxyGet(env, url, ttlStr) {
+  const cacheReq = new Request(url, { method: "GET" });
+  const resp = await cacheThrough(cacheReq, () =>
+    fetch(url, { headers: { Authorization: `Bearer ${env.STEAMDT_KEY}` } }),
+    ttlStr,
+  );
+  if (!resp) return json({ success: false, error: "upstream error" }, 502);
+  return resp;
+}
+
+async function proxyPost(env, url, bodyStr, ttlStr) {
+  const cacheReq = new Request(url, { method: "POST", body: bodyStr });
+  const resp = await cacheThrough(cacheReq, () =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.STEAMDT_KEY}` },
+      body: bodyStr,
+    }),
+    ttlStr,
+  );
+  if (!resp) return json({ success: false, error: "upstream error" }, 502);
+  return resp;
+}
 
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {

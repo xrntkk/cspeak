@@ -401,38 +401,38 @@ async fn download_update(
 
 #[tauri::command]
 async fn market_price_single(
-    key: String,
+    access_token: Option<String>,
     market_hash_name: String,
 ) -> Result<Vec<market::PlatformPrice>, String> {
-    market::price_single(&key, &market_hash_name)
+    market::price_single(access_token.as_deref(), &market_hash_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn market_item_kline(
-    key: String,
+    access_token: Option<String>,
     market_hash_name: String,
     platform: String,
     kline_type: String,
 ) -> Result<Vec<market::Candle>, String> {
-    market::item_kline(&key, &market_hash_name, &platform, &kline_type)
+    market::item_kline(access_token.as_deref(), &market_hash_name, &platform, &kline_type)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn market_broad_index(key: String) -> Result<market::BroadIndex, String> {
-    market::broad_index(&key).await.map_err(|e| e.to_string())
+async fn market_broad_index(
+    access_token: Option<String>,
+) -> Result<market::BroadIndex, String> {
+    market::broad_index(access_token.as_deref()).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn market_list(
-    sort_type: i64,
-    page_size: i64,
-    next_id: String,
+    access_token: Option<String>,
 ) -> Result<market::MarketListPage, String> {
-    market::market_list(sort_type, page_size, &next_id)
+    market::market_list(access_token.as_deref())
         .await
         .map_err(|e| e.to_string())
 }

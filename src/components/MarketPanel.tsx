@@ -46,12 +46,12 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
 
   // Big-board index: fetch once.
   useEffect(() => {
-    marketBroadIndex().then(setIndex).catch(() => {});
-  }, []);
+    marketBroadIndex(accessToken).then(setIndex).catch(() => {});
+  }, [accessToken]);
 
   // Hot list (rich cards with prices/images) as the default view.
   useEffect(() => {
-    marketList(1, 100, "")
+    marketList(accessToken)
       .then((page) => setHot(page.list))
       .catch(() => {})
       .finally(() => setHotLoading(false));
@@ -172,7 +172,7 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
       )}
 
       {selected && (
-        <ItemDetail target={selected} dark={dark} onClose={() => setSelected(null)} />
+        <ItemDetail target={selected} dark={dark} accessToken={accessToken} onClose={() => setSelected(null)} />
       )}
     </div>
   );
@@ -291,10 +291,12 @@ function ItemCard({ item, onClick }: { item: MarketListItem; onClick: () => void
 function ItemDetail({
   target,
   dark,
+  accessToken,
   onClose,
 }: {
   target: DetailTarget;
   dark: boolean;
+  accessToken?: string;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -307,14 +309,15 @@ function ItemDetail({
 
   useEffect(() => {
     if (target.prices && target.prices.length) return;
-    marketPriceSingle(target.marketHashName)
+    marketPriceSingle(accessToken, target.marketHashName)
       .then(setPrices)
       .catch(() => setPrices([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target.marketHashName, target.prices]);
 
   useEffect(() => {
     setLoading(true);
-    marketItemKline(target.marketHashName, platform, klineType)
+    marketItemKline(accessToken, target.marketHashName, platform, klineType)
       .then(setCandles)
       .catch(() => setCandles([]))
       .finally(() => setLoading(false));

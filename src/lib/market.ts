@@ -1,9 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-// User's SteamDT open-platform API key (for price/kline/index endpoints).
-export const STEAMDT_KEY = "e71ae37c4d464b1888264e3cceaa8de3";
-
-// Cloudflare Worker that caches the full item catalogue (base endpoint is
+// Cloudflare Worker that proxies all SteamDT market APIs and caches them.
+// The SteamDT API key lives ONLY in the Worker secret — never shipped to clients. (base endpoint is
 // rate-limited to once/day; the Worker absorbs that and serves all clients).
 const CATALOGUE_URL = "https://csspeak-market.xrntkk.top/base";
 
@@ -72,30 +70,34 @@ export interface MarketListPage {
   nextId: string;
 }
 
-export function marketList(sortType: number, pageSize: number, nextId = "") {
-  return invoke<MarketListPage>("market_list", { sortType, pageSize, nextId });
+export function marketList(accessToken?: string) {
+  return invoke<MarketListPage>("market_list", { accessToken: accessToken ?? null });
 }
 
-export function marketPriceSingle(marketHashName: string) {
+export function marketPriceSingle(
+  accessToken: string | undefined,
+  marketHashName: string,
+) {
   return invoke<PlatformPrice[]>("market_price_single", {
-    key: STEAMDT_KEY,
+    accessToken: accessToken ?? null,
     marketHashName,
   });
 }
 
 export function marketItemKline(
+  accessToken: string | undefined,
   marketHashName: string,
   platform: string,
   klineType: string,
 ) {
   return invoke<Candle[]>("market_item_kline", {
-    key: STEAMDT_KEY,
+    accessToken: accessToken ?? null,
     marketHashName,
     platform,
     klineType,
   });
 }
 
-export function marketBroadIndex() {
-  return invoke<BroadIndex>("market_broad_index", { key: STEAMDT_KEY });
+export function marketBroadIndex(accessToken?: string) {
+  return invoke<BroadIndex>("market_broad_index", { accessToken: accessToken ?? null });
 }
