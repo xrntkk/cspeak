@@ -102,9 +102,10 @@ mod enhance_impl {
 mod enhance_impl {
     use super::*;
 
-    pub struct Apm;
+    pub struct Apm { pub enabled: std::sync::atomic::AtomicBool }
     impl Apm {
         pub fn new() -> Result<Arc<Self>> { Err(anyhow!("apm not available on this platform")) }
+        pub fn set_denoise(&self, _: DenoiseMode) {}
         pub fn is_enabled(&self) -> bool { false }
         pub fn process_render(&self, _: &mut [f32]) {}
         pub fn process_capture(&self, _: &mut [f32]) {}

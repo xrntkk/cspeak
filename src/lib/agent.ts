@@ -69,6 +69,33 @@ export async function executeClientTool(
   input: unknown,
   ctx: AgentToolContext,
 ): Promise<unknown> {
+  try {
+    return await runTool(name, input, ctx);
+  } catch (e) {
+    // Tauri IPC rejections arrive as strings; normalise into a clear message
+    // so the model and the UI badge both can surface it.
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `[${name}] ${describeIpcError(msg)}` };
+  }
+}
+
+/// Translate raw Tauri/reqwest error strings into friendlier Chinese text.
+function describeIpcError(msg: string): string {
+  if (msg.includes("401")) return "访问令牌无效或未填写";
+  if (msg.includes("429")) return "请求过于频繁，请稍后再试";
+  if (msg.includes("404")) return "接口不存在，请检查后端是否已部署最新版本";
+  if (msg.includes("502") || msg.includes("503") || msg.includes("504"))
+    return "上游服务暂时不可用";
+  if (msg.includes("broad index unavailable"))
+    return "大盘指数数据暂不可用（可能被限流，稍后重试）";
+  return msg;
+}
+
+async function runTool(
+  name: string,
+  input: unknown,
+  ctx: AgentToolContext,
+): Promise<unknown> {
   const accessToken = ctx.accessToken;
   const args = (input ?? {}) as Record<string, unknown>;
 

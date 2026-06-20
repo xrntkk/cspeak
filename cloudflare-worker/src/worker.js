@@ -169,18 +169,45 @@ function checkAccess(request, env) {
   if (!env.AGENT_ACCESS_TOKEN) return null; // gate disabled
   const auth = request.headers.get("authorization") ?? "";
   if (auth !== `Bearer ${env.AGENT_ACCESS_TOKEN}`) {
-    return json({ error: "unauthorized" }, 401);
+    return json(
+      {
+        error: "访问令牌缺失或无效，请在客户端设置中填写正确的访问令牌",
+        code: "UNAUTHORIZED",
+      },
+      401,
+    );
   }
   return null;
 }
 
 async function handleAgent(request, env) {
   if (!env.EVOMAP_API_KEY) {
-    return json({ error: "EVOMAP_API_KEY not configured" }, 500);
+    return json(
+      {
+        error: "服务端未配置 EVOMAP_API_KEY，请联系管理员",
+        code: "MISSING_API_KEY",
+      },
+      500,
+    );
   }
 
-  const body = await request.json();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json(
+      { error: "请求体不是合法的 JSON", code: "BAD_REQUEST" },
+      400,
+    );
+  }
+
   const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return json(
+      { error: "messages 字段为空或格式不正确", code: "BAD_REQUEST" },
+      400,
+    );
+  }
 
   // EvoMap exposes an OpenAI-compatible API, so we reuse the OpenAI provider
   // with a custom baseURL. The API key lives ONLY in the Worker secret — it is
@@ -191,25 +218,64 @@ async function handleAgent(request, env) {
   });
   const modelId = env.AGENT_MODEL || "evomap-deepseek-v4-flash";
 
-  const result = streamText({
-    model: provider(modelId),
-    system: SYSTEM_PROMPT,
-    messages: await convertToModelMessages(messages),
-    stopWhen: isStepCount(8),
-    tools: agentTools,
-  });
+  let result;
+  try {
+    result = streamText({
+      model: provider(modelId),
+      system: SYSTEM_PROMPT,
+      messages: await convertToModelMessages(messages),
+      stopWhen: isStepCount(8),
+      tools: agentTools,
+    });
+  } catch (e) {
+    return json(
+      {
+        error: `模型初始化失败：${e instanceof Error ? e.message : String(e)}`,
+        code: "MODEL_INIT_FAILED",
+      },
+      500,
+    );
+  }
 
   return createUIMessageStreamResponse({
     stream: toUIMessageStream({
       stream: result.stream,
       onError: (error) => {
-        if (error == null) return "unknown error";
-        if (typeof error === "string") return error;
-        if (error instanceof Error) return error.message;
-        return JSON.stringify(error);
+        // Translate common upstream errors into actionable Chinese messages
+        // so the desktop client can surface them directly.
+        return describeStreamError(error);
       },
     }),
   });
+}
+
+/// Map an opaque stream error to a human-readable Chinese message. Includes
+/// a `code` prefix so the frontend can pattern-match for special handling
+/// (e.g. auth failures, rate limits).
+function describeStreamError(error) {
+  if (error == null) return "[INTERNAL] 未知错误";
+  if (typeof error === "string") return error;
+
+  if (error instanceof Error) {
+    const msg = error.message;
+    // OpenAI-compatible API error shapes
+    if (error.name === "APIError" || msg.includes("API error")) {
+      if (msg.includes("401")) return "[AUTH] EvoMap API 密钥无效或已过期";
+      if (msg.includes("429")) return "[RATE_LIMIT] 请求过于频繁，请稍后再试";
+      if (msg.includes("500") || msg.includes("502") || msg.includes("503"))
+        return "[UPSTREAM] EvoMap 服务暂时不可用，请稍后重试";
+      if (msg.includes("400")) return `[BAD_REQUEST] ${msg}`;
+    }
+    if (msg.includes("fetch") || msg.includes("network") || msg.includes("ECONNRESET"))
+      return "[NETWORK] 无法连接到 EvoMap 服务，请检查网络";
+    return msg;
+  }
+
+  // Some SDKs throw plain objects
+  const str = JSON.stringify(error);
+  if (str.includes("401")) return "[AUTH] EvoMap API 密钥无效或已过期";
+  if (str.includes("429")) return "[RATE_LIMIT] 请求过于频繁，请稍后再试";
+  return str;
 }
 
 // ---------------------------------------------------------------------------

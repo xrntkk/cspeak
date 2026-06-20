@@ -38,6 +38,67 @@ const QUICK_PROMPTS = [
   "在频道发个整活消息活跃一下气氛",
 ];
 
+/// Translate a raw Error/JSON from useChat into a user-friendly message with
+/// an actionable hint. Covers WebKit network failures, 401 auth rejections,
+/// and upstream LLM errors forwarded by the Worker.
+function describeError(err: unknown): { message: string; hint?: string } {
+  if (!err) return { message: "未知错误" };
+
+  const raw = err instanceof Error ? err.message : String(err);
+
+  // WebKit/Safari generic network failures — the most common cause of
+  // "Load failed". Usually CORS, DNS, or the Worker is down.
+  if (raw === "Load failed" || raw === "Failed to fetch" || raw.includes("NetworkError")) {
+    return {
+      message: "无法连接到 Agent 服务",
+      hint: "请检查网络连接，或确认后端地址是否正确。若刚修改了后端配置，请重新部署 Worker。",
+    };
+  }
+
+  // Auth errors (Worker returns 401 with code UNAUTHORIZED)
+  if (raw.includes("401") || raw.includes("UNAUTHORIZED") || raw.includes("unauthorized")) {
+    return {
+      message: "访问令牌无效或未填写",
+      hint: "请打开「设置 → CS Agent → 访问令牌」，填写与后端 AGENT_ACCESS_TOKEN 一致的值。",
+    };
+  }
+
+  // Worker-side forwarded errors prefixed with [CODE]
+  const m = raw.match(/^\[(\w+)\]\s*(.*)/);
+  if (m) {
+    const [, code, detail] = m;
+    switch (code) {
+      case "AUTH":
+        return {
+          message: detail,
+          hint: "EvoMap API 密钥可能已失效，请联系后端管理员更新。",
+        };
+      case "RATE_LIMIT":
+        return { message: detail, hint: "请等待几秒后再试。" };
+      case "UPSTREAM":
+        return { message: detail, hint: "EvoMap 服务暂时不可用，稍后重试。" };
+      case "NETWORK":
+        return { message: detail };
+      case "MISSING_API_KEY":
+        return {
+          message: detail,
+          hint: "后端 Worker 尚未配置 EvoMap API 密钥，请联系管理员。",
+        };
+      case "BAD_REQUEST":
+        return { message: detail, hint: "请求格式有误，请重试或更换提问方式。" };
+      case "MODEL_INIT_FAILED":
+        return { message: detail, hint: "模型配置有误，请检查后端 AGENT_MODEL 设置。" };
+      default:
+        return { message: detail || raw };
+    }
+  }
+
+  // Fallback: show the raw message, truncated if very long.
+  return {
+    message: raw.length > 120 ? raw.slice(0, 120) + "…" : raw,
+  };
+}
+
 export function CsAgentPanel({
   endpoint,
   accessToken,
@@ -163,11 +224,7 @@ export function CsAgentPanel({
           </div>
         )}
 
-        {error && (
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-            出错了：{error.message}
-          </div>
-        )}
+        {error && <ErrorBanner error={error} />}
       </div>
 
       {/* Input */}
@@ -210,6 +267,19 @@ export function CsAgentPanel({
   );
 }
 
+function ErrorBanner({ error }: { error: unknown }) {
+  const { message, hint } = describeError(error);
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      <div className="flex items-center gap-1.5">
+        <span>✕</span>
+        <span className="font-medium">{message}</span>
+      </div>
+      {hint && <p className="text-destructive/80">{hint}</p>}
+    </div>
+  );
+}
+
 function ToolBadge({ part }: { part: ToolPart }) {
   const label = TOOL_LABELS[part.toolName] ?? part.toolName;
   const done = part.state === "output-available";
@@ -217,18 +287,21 @@ function ToolBadge({ part }: { part: ToolPart }) {
   const loading =
     part.state === "input-streaming" || part.state === "input-available";
 
-  // If a messaging tool succeeded, show a compact confirmation.
+  // Extract a human-readable detail line from the tool result or error.
   let detail: string | null = null;
   if (done && part.output && typeof part.output === "object") {
     const out = part.output as Record<string, unknown>;
     if (out.error) detail = String(out.error);
     else if (out.success) detail = "✓ 已执行";
   }
+  if (failed && part.errorText) {
+    detail = part.errorText;
+  }
 
   return (
     <div
       className={cn(
-        "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
+        "flex flex-col gap-0.5 rounded-md border px-2 py-1 text-xs",
         failed
           ? "border-destructive/30 bg-destructive/5 text-destructive"
           : done
@@ -236,12 +309,19 @@ function ToolBadge({ part }: { part: ToolPart }) {
             : "border-border bg-card text-muted-foreground",
       )}
     >
-      <span>{loading ? "⏳" : failed ? "✕" : "🔧"}</span>
-      <span>
-        {label}
-        {loading && "…"}
-      </span>
-      {detail && <span className="text-muted-foreground">· {detail}</span>}
+      <div className="flex items-center gap-1.5">
+        <span>{loading ? "⏳" : failed ? "✕" : "🔧"}</span>
+        <span>
+          {label}
+          {loading && "…"}
+        </span>
+        {detail && !failed && (
+          <span className="text-muted-foreground">· {detail}</span>
+        )}
+      </div>
+      {failed && detail && (
+        <span className="pl-5 text-destructive/80">{detail}</span>
+      )}
     </div>
   );
 }
