@@ -35,6 +35,7 @@ fn pct(s: &str) -> String {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlatformPrice {
     pub platform: String,
     pub sell_price: f64,
@@ -84,6 +85,7 @@ pub async fn item_kline(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BroadIndex {
     pub index: f64,
     pub diff_yesterday: f64,
@@ -121,6 +123,7 @@ pub async fn broad_index(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarketListItem {
     pub item_id: String,
     pub name: String,
@@ -133,6 +136,7 @@ pub struct MarketListItem {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MarketListPage {
     pub list: Vec<MarketListItem>,
     pub next_id: String,

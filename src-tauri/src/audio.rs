@@ -23,7 +23,7 @@ pub type Handler = AudioHandler<ClientId>;
 //        runs without echo cancellation / AI denoise on those targets.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(target_arch = "aarch64")]
 mod enhance_impl {
     use super::*;
 
@@ -98,7 +98,7 @@ mod enhance_impl {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(target_arch = "aarch64"))]
 mod enhance_impl {
     use super::*;
 

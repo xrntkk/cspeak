@@ -36,7 +36,7 @@ tauri-plugin-dialog = "2.7.1"
 # WebRTC AEC + DeepFilterNet denoise only build on macOS (meson/ninja + tract).
 # On Windows/Linux CI these are excluded so `tauri build` succeeds on all
 # platforms — the app runs without echo cancellation on those targets.
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(target_arch = "aarch64")'.dependencies]
 webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 deep_filter = { path = "../vendor/deepfilter", default-features = false, features = ["tract", "default-model"] }
 ndarray = "0.15"

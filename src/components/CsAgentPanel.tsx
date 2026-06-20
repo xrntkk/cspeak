@@ -46,17 +46,35 @@ function describeError(err: unknown): { message: string; hint?: string } {
 
   const raw = err instanceof Error ? err.message : String(err);
 
-  // WebKit/Safari generic network failures — the most common cause of
-  // "Load failed". Usually CORS, DNS, or the Worker is down.
-  if (raw === "Load failed" || raw === "Failed to fetch" || raw.includes("NetworkError")) {
-    return {
-      message: "无法连接到 Agent 服务",
-      hint: "请检查网络连接，或确认后端地址是否正确。若刚修改了后端配置，请重新部署 Worker。",
-    };
+  // The AI SDK transport reads response.text() on non-2xx and throws it as
+  // the error message. Try to parse it as a Worker JSON error first.
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const code = parsed.code as string | undefined;
+      const msg = parsed.error as string | undefined;
+      if (code === "UNAUTHORIZED" || msg?.includes("unauthorized") || msg?.includes("令牌")) {
+        return {
+          message: msg ?? "访问令牌无效或未填写",
+          hint: "请打开「设置 → CS Agent → 访问令牌」，填写与后端 AGENT_ACCESS_TOKEN 一致的值。",
+        };
+      }
+      if (code === "MISSING_API_KEY") {
+        return { message: msg ?? "服务端未配置 API 密钥", hint: "请联系后端管理员配置 EVOMAP_API_KEY。" };
+      }
+      if (msg) return { message: msg };
+    }
+  } catch {
+    // not JSON, continue with string matching below
   }
 
-  // Auth errors (Worker returns 401 with code UNAUTHORIZED)
-  if (raw.includes("401") || raw.includes("UNAUTHORIZED") || raw.includes("unauthorized")) {
+  // Auth errors (Worker returns 401; body may or may not be readable in WebKit)
+  if (
+    raw.includes("401") ||
+    raw.includes("UNAUTHORIZED") ||
+    raw.includes("unauthorized") ||
+    raw.includes("令牌")
+  ) {
     return {
       message: "访问令牌无效或未填写",
       hint: "请打开「设置 → CS Agent → 访问令牌」，填写与后端 AGENT_ACCESS_TOKEN 一致的值。",
@@ -69,10 +87,7 @@ function describeError(err: unknown): { message: string; hint?: string } {
     const [, code, detail] = m;
     switch (code) {
       case "AUTH":
-        return {
-          message: detail,
-          hint: "EvoMap API 密钥可能已失效，请联系后端管理员更新。",
-        };
+        return { message: detail, hint: "EvoMap API 密钥可能已失效，请联系后端管理员更新。" };
       case "RATE_LIMIT":
         return { message: detail, hint: "请等待几秒后再试。" };
       case "UPSTREAM":
@@ -80,10 +95,7 @@ function describeError(err: unknown): { message: string; hint?: string } {
       case "NETWORK":
         return { message: detail };
       case "MISSING_API_KEY":
-        return {
-          message: detail,
-          hint: "后端 Worker 尚未配置 EvoMap API 密钥，请联系管理员。",
-        };
+        return { message: detail, hint: "后端 Worker 尚未配置 EvoMap API 密钥，请联系管理员。" };
       case "BAD_REQUEST":
         return { message: detail, hint: "请求格式有误，请重试或更换提问方式。" };
       case "MODEL_INIT_FAILED":
@@ -91,6 +103,14 @@ function describeError(err: unknown): { message: string; hint?: string } {
       default:
         return { message: detail || raw };
     }
+  }
+
+  // WebKit/Safari generic network failures — CORS rejection, DNS, Worker down.
+  if (raw === "Load failed" || raw === "Failed to fetch" || raw.includes("NetworkError")) {
+    return {
+      message: "无法连接到 Agent 服务",
+      hint: "请检查网络连接，或确认后端地址是否正确。若刚修改了后端配置，请重新部署 Worker。",
+    };
   }
 
   // Fallback: show the raw message, truncated if very long.
@@ -224,7 +244,7 @@ export function CsAgentPanel({
           </div>
         )}
 
-        {error && <ErrorBanner error={error} />}
+        {error && <ErrorBanner error={error} noToken={!accessToken} />}
       </div>
 
       {/* Input */}
@@ -267,8 +287,17 @@ export function CsAgentPanel({
   );
 }
 
-function ErrorBanner({ error }: { error: unknown }) {
-  const { message, hint } = describeError(error);
+function ErrorBanner({ error, noToken }: { error: unknown; noToken?: boolean }) {
+  let { message, hint } = describeError(error);
+
+  // If the token is empty and we got a network-level error, the most likely
+  // cause is a 401 that WebKit couldn't surface (it masks the response body
+  // behind "Load failed"). Override the hint to guide the user to fill the token.
+  if (noToken && (message.includes("无法连接") || message.includes("Load failed"))) {
+    message = "可能缺少访问令牌";
+    hint = "后端已启用访问控制。请打开「设置 → CS Agent → 访问令牌」填写正确的令牌。";
+  }
+
   return (
     <div className="flex flex-col gap-1 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
       <div className="flex items-center gap-1.5">
