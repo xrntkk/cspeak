@@ -2,6 +2,8 @@ name = "csspeak-market"
 main = "src/worker.js"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
+[assets]
+directory = "public"
 
 # CS Agent secrets (set via `wrangler secret put <NAME>`):
 #   EVOMAP_API_KEY     — EvoMap API key for the agent LLM (required for /agent)

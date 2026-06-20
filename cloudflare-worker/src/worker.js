@@ -305,7 +305,7 @@ export default {
     ctx.waitUntil(refreshCatalogue(env).catch((e) => console.error(e)));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
@@ -389,10 +389,8 @@ export default {
       return proxyPost(env, `${BASE}/open/cs2/item/v1/kline`, body, ttl(TTL.kline));
     }
 
-    // GET /hotlist  →  public web skin/market/v1/list (10 min cache, no auth)
+    // GET /hotlist  →  public web skin/market/v1/list (10 min cache, open)
     if (url.pathname === "/hotlist") {
-      const denied = checkAccess(request, env);
-      if (denied) return denied;
       const body = JSON.stringify({ sortType: 1, pageSize: 100 });
       const key = new Request(`https://hotlist`, { method: "GET" });
       // Build a deduplicated cache key from the body.
