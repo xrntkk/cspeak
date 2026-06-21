@@ -1,9 +1,11 @@
-// csspeak market cache + CS Agent Worker.
+// csspeak market cache + CS Agent + demo replay Worker.
 //
 // Routes:
-//   GET  /base       — cached CS2 item catalogue (daily cron refresh)
-//   GET  /refresh    — force-refresh the catalogue (requires ?secret=)
-//   POST /agent      — CS Agent: AI SDK v7 UI-message-stream over EvoMap
+//   GET  /base                — cached CS2 item catalogue (daily cron refresh)
+//   GET  /refresh             — force-refresh the catalogue (requires ?secret=)
+//   POST /agent               — CS Agent: AI SDK v7 UI-message-stream over EvoMap
+//   POST /demo/upload         — upload a .dem file, parse it, store report JSON
+//   GET  /demo/report/:id     — fetch a stored report JSON
 //
 // Secrets (set via `wrangler secret put`):
 //   STEAMDT_KEY     — SteamDT open-platform API key
@@ -11,6 +13,8 @@
 //   REFRESH_SECRET  — shared secret for manual catalogue refresh
 // Optional env:
 //   AGENT_MODEL     — model id (default: evomap-deepseek-v4-flash)
+
+import { loadReport, parseDemoToReport, storeReport } from "./demo.js";
 
 const BASE = "https://open.steamdt.com";
 const WEB_BASE = "https://www.steamdt.com/api";
@@ -454,8 +458,21 @@ export default {
     }
 
     if (url.pathname === "/base") {
-      const cached = await env.MARKET_CACHE.get(KV_KEY);
-      const ts = await env.MARKET_CACHE.get(KV_TS_KEY);
+      let cached = await env.MARKET_CACHE.get(KV_KEY);
+      let ts = await env.MARKET_CACHE.get(KV_TS_KEY);
+      if (!cached) {
+        // Cache miss — try to populate from SteamDT. The base endpoint is
+        // rate-limited to once/day, so this consumes that call.
+        try {
+          const count = await refreshCatalogue(env);
+          cached = await env.MARKET_CACHE.get(KV_KEY);
+          ts = await env.MARKET_CACHE.get(KV_TS_KEY);
+          console.log(`catalogue populated on demand: ${count} items`);
+        } catch (e) {
+          console.error("catalogue refresh failed:", e);
+          return json({ success: false, error: `catalogue not ready: ${e.message}` }, 503);
+        }
+      }
       if (!cached) {
         return json({ success: false, error: "catalogue not ready" }, 503);
       }
@@ -482,6 +499,57 @@ export default {
       try {
         const count = await refreshCatalogue(env);
         return json({ success: true, count });
+      } catch (e) {
+        return json({ success: false, error: String(e) }, 500);
+      }
+    }
+
+    // ---- Demo replay parsing endpoints ----
+
+    if (url.pathname === "/demo/upload" && request.method === "POST") {
+      try {
+        const contentLength = request.headers.get("content-length");
+        const maxBytes = 95 * 1024 * 1024; // 95 MB — leave headroom under Worker body limit
+        if (contentLength && Number(contentLength) > maxBytes) {
+          return json({ success: false, error: "demo file too large (max 95 MB)" }, 413);
+        }
+
+        const bytes = new Uint8Array(await request.arrayBuffer());
+        if (bytes.length > maxBytes) {
+          return json({ success: false, error: "demo file too large (max 95 MB)" }, 413);
+        }
+
+        const report = await parseDemoToReport(bytes);
+        const { reportId, url } = await storeReport(report, env);
+
+        return json({
+          success: true,
+          reportId,
+          url,
+          summary: {
+            map: report.header.map,
+            scoreCt: report.finalScore.ct,
+            scoreT: report.finalScore.t,
+            durationSeconds: report.header.durationSeconds,
+            totalRounds: report.totalRounds,
+          },
+        });
+      } catch (e) {
+        console.error("demo upload failed:", e);
+        return json({ success: false, error: String(e) }, 500);
+      }
+    }
+
+    if (url.pathname.startsWith("/demo/report/")) {
+      const reportId = url.pathname.slice("/demo/report/".length);
+      try {
+        const report = await loadReport(reportId, env);
+        if (!report) {
+          return json({ success: false, error: "report not found" }, 404);
+        }
+        return new Response(JSON.stringify(report), {
+          headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=3600", ...CORS },
+        });
       } catch (e) {
         return json({ success: false, error: String(e) }, 500);
       }
@@ -538,7 +606,17 @@ export default {
     return json({
       success: true,
       service: "csspeak-market",
-      endpoints: ["/base", "/refresh", "/agent (POST)", "/trend", "/price", "/kline", "/hotlist"],
+      endpoints: [
+        "/base",
+        "/refresh",
+        "/agent (POST)",
+        "/demo/upload (POST)",
+        "/demo/report/:id",
+        "/trend",
+        "/price",
+        "/kline",
+        "/hotlist",
+      ],
     });
   },
 };
