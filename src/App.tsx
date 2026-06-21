@@ -127,6 +127,7 @@ function App() {
   const [ping, setPing] = useState<number | null>(null);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [scrollToSettingsUpdate, setScrollToSettingsUpdate] = useState(false);
 
   // Persist settings whenever they change.
   useEffect(() => {
@@ -275,7 +276,10 @@ function App() {
           <div className="flex h-12 shrink-0 items-center justify-center gap-2 border-b border-primary/20 bg-primary/5 px-4">
             <button
               type="button"
-              onClick={() => setActiveNav("settings")}
+              onClick={() => {
+                setActiveNav("settings");
+                setScrollToSettingsUpdate(true);
+              }}
               className="focus:outline-none"
               title="点击前往更新"
             >
@@ -332,7 +336,6 @@ function App() {
                 busy={busy}
                 bookmarks={bookmarks}
                 recent={recent}
-                latestVersion={latestVersion}
                 onAddress={setAddress}
                 onNickname={setNickname}
                 onConnect={() => {
@@ -358,7 +361,6 @@ function App() {
                   setAddress(r.address);
                   setNickname(r.nickname);
                 }}
-                onDismissUpdate={() => setUpdateDismissed(true)}
               />
             ) : (
               <ServerView
@@ -394,6 +396,8 @@ function App() {
               settings={settings}
               onChange={setSettings}
               inline
+              scrollToUpdate={scrollToSettingsUpdate}
+              onScrolledToUpdate={() => setScrollToSettingsUpdate(false)}
             />
           </>
         ) : (

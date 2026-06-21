@@ -9,7 +9,6 @@ interface WelcomePageProps {
   busy: boolean;
   bookmarks: Bookmark[];
   recent: RecentConnection[];
-  latestVersion: string | null;
   onAddress: (v: string) => void;
   onNickname: (v: string) => void;
   onConnect: () => void;
@@ -17,7 +16,6 @@ interface WelcomePageProps {
   onAddBookmark: () => void;
   onRemoveBookmark: (address: string) => void;
   onSelectRecent: (r: RecentConnection) => void;
-  onDismissUpdate: () => void;
 }
 
 export function WelcomePage({
@@ -26,7 +24,6 @@ export function WelcomePage({
   busy,
   bookmarks,
   recent,
-  latestVersion,
   onAddress,
   onNickname,
   onConnect,
@@ -34,7 +31,6 @@ export function WelcomePage({
   onAddBookmark,
   onRemoveBookmark,
   onSelectRecent,
-  onDismissUpdate,
 }: WelcomePageProps) {
   return (
     <div className="relative flex flex-1 items-center justify-center overflow-hidden p-6">
@@ -65,10 +61,6 @@ export function WelcomePage({
             onSelect={onSelectBookmark}
             onRemove={onRemoveBookmark}
           />
-
-          {latestVersion && (
-            <UpdateCard version={latestVersion} onDismiss={onDismissUpdate} />
-          )}
         </div>
       </div>
     </div>
@@ -227,33 +219,6 @@ function BookmarksCard({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function UpdateCard({
-  version,
-  onDismiss,
-}: {
-  version: string;
-  onDismiss: () => void;
-}) {
-  return (
-    <div className="rounded-2xl border border-primary/20 bg-primary/5 p-5">
-      <div className="mb-2 flex items-center gap-2 text-sm font-medium text-primary">
-        <Rocket className="size-4" />
-        发现新版本 v{version}
-      </div>
-      <p className="mb-3 text-xs text-muted-foreground">
-        新版本已发布，建议前往设置页面下载更新以获得最新功能与修复。
-      </p>
-      <button
-        type="button"
-        onClick={onDismiss}
-        className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-      >
-        知道了
-      </button>
     </div>
   );
 }

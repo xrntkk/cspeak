@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Bot,
@@ -127,11 +127,15 @@ export function SettingsPanel({
   onChange,
   onClose,
   inline = false,
+  scrollToUpdate = false,
+  onScrolledToUpdate,
 }: {
   settings: AudioSettings;
   onChange: (next: AudioSettings) => void;
   onClose?: () => void;
   inline?: boolean;
+  scrollToUpdate?: boolean;
+  onScrolledToUpdate?: () => void;
 }) {
   const [inputs, setInputs] = useState<string[]>([]);
   const [outputs, setOutputs] = useState<string[]>([]);
@@ -145,6 +149,24 @@ export function SettingsPanel({
   const [downloadedPath, setDownloadedPath] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
+  const updateSectionRef = useRef<HTMLDivElement>(null);
+
+  // Auto-check for updates on mount so the current version and availability
+  // are visible immediately without an extra click.
+  useEffect(() => {
+    if (settings.updateCheckEnabled) {
+      doCheckUpdate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Scroll to the update section when requested (e.g. from the update banner).
+  useEffect(() => {
+    if (scrollToUpdate && updateSectionRef.current) {
+      updateSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      onScrolledToUpdate?.();
+    }
+  }, [scrollToUpdate, onScrolledToUpdate]);
 
   const doCheckUpdate = async () => {
     setCheckingUpdate(true);
@@ -502,8 +524,9 @@ export function SettingsPanel({
             </p>
           </Section>
 
-          <Section icon={<Download className="size-3.5" />} title="更新">
-            <div className="flex items-center justify-between gap-3">
+          <div ref={updateSectionRef}>
+            <Section icon={<Download className="size-3.5" />} title="更新">
+              <div className="flex items-center justify-between gap-3">
               <span className="text-sm">当前版本</span>
               <span className="rounded-md bg-accent px-2 py-0.5 font-mono text-xs">
                 v{updateInfo?.currentVersion ?? "—"}
@@ -663,6 +686,7 @@ export function SettingsPanel({
           </Section>
         </div>
       </div>
+    </div>
   );
 
   if (inline) return panel;
