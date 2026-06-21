@@ -1,0 +1,22 @@
+{
+  "name": "cloudflare-worker",
+  "version": "1.0.0",
+  "description": "csspeak Cloudflare Worker: market cache + CS Agent + demo replay reports",
+  "type": "module",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "postinstall": "patch-package"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "demoparser2": "^0.15.0"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
+  }
+}

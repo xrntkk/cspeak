@@ -1,11 +1,14 @@
 // csspeak market cache + CS Agent + demo replay Worker.
 //
 // Routes:
-//   GET  /base                — cached CS2 item catalogue (daily cron refresh)
-//   GET  /refresh             — force-refresh the catalogue (requires ?secret=)
-//   POST /agent               — CS Agent: AI SDK v7 UI-message-stream over EvoMap
-//   POST /demo/upload         — upload a .dem file, parse it, store report JSON
-//   GET  /demo/report/:id     — fetch a stored report JSON
+//   GET  /base                       — cached CS2 item catalogue (daily cron refresh)
+//   GET  /refresh                    — force-refresh the catalogue (requires ?secret=)
+//   POST /agent                      — CS Agent: AI SDK v7 UI-message-stream over EvoMap
+//   POST /demo/upload                — upload a small .dem file directly, parse and store report
+//   POST /demo/start-upload          — start multipart upload for large .dem files
+//   POST /demo/upload-part           — upload one part of a multipart upload
+//   POST /demo/complete-upload       — complete multipart upload, parse and store report
+//   GET  /demo/report/:id            — fetch a stored report JSON
 //
 // Secrets (set via `wrangler secret put`):
 //   STEAMDT_KEY     — SteamDT open-platform API key
@@ -14,7 +17,14 @@
 // Optional env:
 //   AGENT_MODEL     — model id (default: evomap-deepseek-v4-flash)
 
-import { loadReport, parseDemoToReport, storeReport } from "./demo.js";
+import {
+  completeMultipartUpload,
+  loadReport,
+  parseDemoToReport,
+  startMultipartUpload,
+  storeReport,
+  uploadPart,
+} from "./demo.js";
 
 const BASE = "https://open.steamdt.com";
 const WEB_BASE = "https://www.steamdt.com/api";
@@ -421,7 +431,9 @@ async function refreshCatalogue(env) {
     headers: { Authorization: `Bearer ${env.STEAMDT_KEY}` },
   });
   const json = await resp.json();
-  if (!json.success || !Array.isArray(json.data)) {
+  // SteamDT docs show the success example with success:false; rely on the
+  // presence of a non-empty data array instead of the success flag.
+  if (!Array.isArray(json.data) || json.data.length === 0) {
     throw new Error(`base failed: ${json.errorMsg || resp.status}`);
   }
   const items = json.data.map((it) => ({
@@ -431,7 +443,7 @@ async function refreshCatalogue(env) {
   }));
   await env.MARKET_CACHE.put(KV_KEY, JSON.stringify(items));
   await env.MARKET_CACHE.put(KV_TS_KEY, String(Date.now()));
-  return items.length;
+  return { count: items.length, items };
 }
 
 export default {
@@ -458,23 +470,21 @@ export default {
     }
 
     if (url.pathname === "/base") {
-      let cached = await env.MARKET_CACHE.get(KV_KEY);
-      let ts = await env.MARKET_CACHE.get(KV_TS_KEY);
+      // /base is read-only. Do NOT auto-populate from SteamDT here: the
+      // upstream /open/cs2/v1/base endpoint is limited to once/day, and
+      // letting a read endpoint trigger it can burn the quota on every
+      // cache miss. Populate via the daily cron or /refresh?secret=... .
+      const cached = await env.MARKET_CACHE.get(KV_KEY);
+      const ts = await env.MARKET_CACHE.get(KV_TS_KEY);
       if (!cached) {
-        // Cache miss — try to populate from SteamDT. The base endpoint is
-        // rate-limited to once/day, so this consumes that call.
-        try {
-          const count = await refreshCatalogue(env);
-          cached = await env.MARKET_CACHE.get(KV_KEY);
-          ts = await env.MARKET_CACHE.get(KV_TS_KEY);
-          console.log(`catalogue populated on demand: ${count} items`);
-        } catch (e) {
-          console.error("catalogue refresh failed:", e);
-          return json({ success: false, error: `catalogue not ready: ${e.message}` }, 503);
-        }
-      }
-      if (!cached) {
-        return json({ success: false, error: "catalogue not ready" }, 503);
+        return json(
+          {
+            success: false,
+            error: "catalogue not ready",
+            message: "缓存为空，请等待每日 04:00 UTC 自动刷新，或使用 /refresh?secret= 手动触发",
+          },
+          503,
+        );
       }
       return new Response(
         JSON.stringify({
@@ -497,7 +507,7 @@ export default {
         return json({ success: false, error: "forbidden" }, 403);
       }
       try {
-        const count = await refreshCatalogue(env);
+        const { count } = await refreshCatalogue(env);
         return json({ success: true, count });
       } catch (e) {
         return json({ success: false, error: String(e) }, 500);
@@ -536,6 +546,46 @@ export default {
         });
       } catch (e) {
         console.error("demo upload failed:", e);
+        return json({ success: false, error: String(e) }, 500);
+      }
+    }
+
+    // Multipart upload endpoints for large demo files.
+
+    if (url.pathname === "/demo/start-upload" && request.method === "POST") {
+      try {
+        const { uploadId, key } = await startMultipartUpload(env);
+        return json({ success: true, uploadId, key });
+      } catch (e) {
+        console.error("demo start-upload failed:", e);
+        return json({ success: false, error: String(e) }, 500);
+      }
+    }
+
+    if (url.pathname === "/demo/upload-part" && request.method === "POST") {
+      try {
+        const uploadId = url.searchParams.get("uploadId");
+        const key = url.searchParams.get("key");
+        const partNumber = Number(url.searchParams.get("partNumber"));
+        if (!uploadId || !key || !partNumber) {
+          return json({ success: false, error: "missing uploadId, key or partNumber" }, 400);
+        }
+        const bytes = new Uint8Array(await request.arrayBuffer());
+        const part = await uploadPart(env, key, uploadId, partNumber, bytes);
+        return json({ success: true, part });
+      } catch (e) {
+        console.error("demo upload-part failed:", e);
+        return json({ success: false, error: String(e) }, 500);
+      }
+    }
+
+    if (url.pathname === "/demo/complete-upload" && request.method === "POST") {
+      try {
+        const { uploadId, key, parts } = await request.json();
+        const result = await completeMultipartUpload(env, key, uploadId, parts);
+        return json({ success: true, ...result });
+      } catch (e) {
+        console.error("demo complete-upload failed:", e);
         return json({ success: false, error: String(e) }, 500);
       }
     }
@@ -611,6 +661,9 @@ export default {
         "/refresh",
         "/agent (POST)",
         "/demo/upload (POST)",
+        "/demo/start-upload (POST)",
+        "/demo/upload-part (POST)",
+        "/demo/complete-upload (POST)",
         "/demo/report/:id",
         "/trend",
         "/price",

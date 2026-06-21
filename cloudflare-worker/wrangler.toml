@@ -2,6 +2,13 @@ name = "csspeak-market"
 main = "src/worker.js"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Treat .wasm files as WebAssembly modules so we can import demoparser2's wasm.
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
 [assets]
 directory = "public"
 
@@ -13,6 +20,17 @@ directory = "public"
 # Other secrets:
 #   STEAMDT_KEY     — SteamDT open-platform API key
 #   REFRESH_SECRET  — shared secret for manual catalogue refresh
+
+# Demo replay parsing and report storage.
+# DEMO_REPORTS: R2 bucket for full report JSONs.
+[[r2_buckets]]
+binding = "DEMO_REPORTS"
+bucket_name = "csspeak-demo-reports"
+
+# DEMO_META: KV namespace for lightweight report metadata and report fallback.
+[[kv_namespaces]]
+binding = "DEMO_META"
+id = "29f7525e61db41b19afc7a601e1eea67"
 
 # Custom domain (workers.dev is often blocked in CN; a proxied custom domain
 # on your own zone routes around it).

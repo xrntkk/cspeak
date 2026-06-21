@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
+  BarChart3,
   Bot,
   File,
   Folder,
@@ -57,12 +58,14 @@ import {
   setPttEnabled,
   setSensitivity,
   setSpkGain,
+  shareDemo,
   uploadFile,
   type ChatMessage,
   type ConnStatus,
   type FileEntry,
   type ServerSnapshot,
 } from "@/lib/ipc";
+import { DemoPanel } from "@/components/DemoPanel";
 import { SettingsPanel, type AudioSettings } from "@/components/SettingsPanel";
 import { MarketPanel } from "@/components/MarketPanel";
 import { CsAgentPanel } from "@/components/CsAgentPanel";
@@ -111,7 +114,8 @@ function App() {
   const [talking, setTalking] = useState<number[]>([]);
   const [address, setAddress] = useState("");
   const [nickname, setNickname] = useState("csspeak");
-  const [activeNav, setActiveNav] = useState<"voice" | "soon" | "agent" | "settings">("voice");
+  const [activeNav, setActiveNav] = useState<"voice" | "soon" | "agent" | "settings" | "demo">("voice");
+  const [activeDemoUrl, setActiveDemoUrl] = useState<string | null>(null);
   const { mode: themeMode, resolved: themeResolved, cycle: cycleTheme } = useTheme();
   const dark = themeResolved === "dark";
 
@@ -264,6 +268,7 @@ function App() {
             { icon: Mic, label: "语音", active: activeNav === "voice", onClick: () => setActiveNav("voice") },
             { icon: LayoutGrid, label: "行情", active: activeNav === "soon", onClick: () => setActiveNav("soon") },
             { icon: Bot, label: "Agent", active: activeNav === "agent", onClick: () => setActiveNav("agent") },
+            { icon: BarChart3, label: "Demo", active: activeNav === "demo", onClick: () => setActiveNav("demo") },
             { icon: Settings, label: "设置", active: activeNav === "settings", onClick: () => setActiveNav("settings") },
             { icon: themeIcon, label: themeLabel, onClick: cycleTheme },
           ]}
@@ -369,6 +374,10 @@ function App() {
                 chat={chat}
                 adminMode={settings.adminMode}
                 onDisconnect={() => disconnect()}
+                onViewDemo={(url) => {
+                  setActiveDemoUrl(url);
+                  setActiveNav("demo");
+                }}
               />
             )}
           </>
@@ -386,6 +395,22 @@ function App() {
               connected={connected}
               snapshot={snapshot}
             />
+          </>
+        ) : activeNav === "demo" ? (
+          <>
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+              <span className="font-semibold">Demo 复盘</span>
+              <span className="ml-2 text-xs text-muted-foreground">
+                {activeDemoUrl ? "已加载报告" : "未选择报告"}
+              </span>
+            </header>
+            {activeDemoUrl ? (
+              <DemoPanel reportUrl={activeDemoUrl} />
+            ) : (
+              <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                在语音频道中点击一张 csspeak 复盘卡片即可查看
+              </div>
+            )}
           </>
         ) : activeNav === "settings" ? (
           <>
@@ -424,12 +449,14 @@ function ServerView({
   chat,
   adminMode,
   onDisconnect,
+  onViewDemo,
 }: {
   snapshot: ServerSnapshot | null;
   talking: number[];
   chat: ChatMessage[];
   adminMode: boolean;
   onDisconnect: () => void;
+  onViewDemo?: (url: string) => void;
 }) {
   const [muted, setMutedState] = useState(false);
   const [deafened, setDeafenedState] = useState(false);
@@ -439,6 +466,8 @@ function ServerView({
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [mutedClients, setMutedClients] = useState<Set<number>>(new Set());
   const [clientVolumes, setClientVolumes] = useState<Map<number, number>>(new Map());
+  const [demoSharing, setDemoSharing] = useState(false);
+  const [demoError, setDemoError] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(
     null,
   );
@@ -591,7 +620,10 @@ function ServerView({
                   </span>
                   <span className="font-medium text-primary">{m.from}</span>
                   <span className="text-muted-foreground">：</span>
-                  <MessageBody text={m.message} />
+                  <MessageBody
+                    text={m.message}
+                    onViewDemo={onViewDemo}
+                  />
                 </div>
               ))}
             </div>
@@ -741,6 +773,44 @@ function ServerView({
           <FolderOpen className="size-4" />
           文件
         </button>
+        <div className="relative">
+          <button
+            onClick={async () => {
+              if (demoSharing) return;
+              setDemoError(null);
+              try {
+                const sel = await open({
+                  multiple: false,
+                  filters: [{ name: "CS2 Demo", extensions: ["dem"] }],
+                });
+                if (sel && typeof sel === "string") {
+                  setDemoSharing(true);
+                  await shareDemo(sel);
+                }
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setDemoError(msg);
+                // eslint-disable-next-line no-console
+                console.error("share demo failed", e);
+              } finally {
+                setDemoSharing(false);
+              }
+            }}
+            disabled={demoSharing}
+            className={cn(
+              "flex flex-col items-center gap-0.5 rounded-md px-3 py-1.5 text-xs transition-colors hover:bg-accent",
+              demoSharing ? "text-primary" : demoError ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            <BarChart3 className={cn("size-4", demoSharing && "animate-pulse")} />
+            {demoSharing ? "解析中" : demoError ? "复盘失败" : "复盘"}
+          </button>
+          {demoError && (
+            <div className="absolute bottom-full left-1/2 z-50 mb-2 max-w-xs -translate-x-1/2 rounded-md border border-destructive bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {demoError}
+            </div>
+          )}
+        </div>
         <div className="flex-1" />
         <button
           onClick={onDisconnect}
@@ -887,7 +957,69 @@ function isImageUrl(s: string): boolean {
     || /(imgur|tenor|gfycat|imgbb|postimg)/i.test(s);
 }
 
-function MessageBody({ text }: { text: string }) {
+const DEMO_CARD_RE = /!csspeak:demo:([a-zA-Z0-9_-]+)/;
+
+function parseDemoCard(text: string): { reportId: string; url: string | null; lines: string[] } | null {
+  const match = text.match(DEMO_CARD_RE);
+  if (!match) return null;
+  const reportId = match[1];
+  // Find the report URL in the message.
+  const urlMatch = text.match(/https?:\/\/\S+/);
+  const url = urlMatch ? urlMatch[0] : null;
+  const lines = text.split("\n").filter((l) => l.trim() && !l.includes(`!csspeak:demo:${reportId}`));
+  return { reportId, url, lines };
+}
+
+function DemoCard({
+  reportId,
+  url,
+  lines,
+  onViewDemo,
+}: {
+  reportId: string;
+  url: string | null;
+  lines: string[];
+  onViewDemo?: (url: string) => void;
+}) {
+  return (
+    <div
+      data-report-id={reportId}
+      className="my-1.5 rounded-md border border-border bg-card p-3 shadow-sm"
+    >
+      <div className="flex items-center gap-2 text-xs font-medium text-primary">
+        <BarChart3 className="size-4" />
+        <span>csspeak 复盘卡片</span>
+      </div>
+      <div className="mt-2 space-y-0.5 text-sm">
+        {lines.map((line, i) => (
+          <div key={i} className="text-foreground">{line}</div>
+        ))}
+      </div>
+      {url && (
+        <button
+          type="button"
+          onClick={() => onViewDemo?.(url)}
+          className="mt-2 inline-flex items-center gap-1 rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          查看完整复盘
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MessageBody({
+  text,
+  onViewDemo,
+}: {
+  text: string;
+  onViewDemo?: (url: string) => void;
+}) {
+  const demoCard = useMemo(() => parseDemoCard(text), [text]);
+  if (demoCard) {
+    return <DemoCard {...demoCard} onViewDemo={onViewDemo} />;
+  }
+
   const markdown = useMemo(() => {
     return text
       .split(/(\s+)/)

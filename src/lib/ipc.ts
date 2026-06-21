@@ -163,6 +163,24 @@ export function openInstaller(path: string) {
   return invoke<void>("open_installer", { path });
 }
 
+export interface DemoUploadResult {
+  reportId: string;
+  url: string;
+  map: string;
+  scoreCt: number;
+  scoreT: number;
+  durationSeconds: number;
+  totalRounds: number;
+}
+
+export function uploadDemo(path: string) {
+  return invoke<DemoUploadResult>("upload_demo", { path });
+}
+
+export function shareDemo(path: string) {
+  return invoke<DemoUploadResult>("share_demo", { path });
+}
+
 export interface DownloadProgress {
   downloaded: number;
   total: number;

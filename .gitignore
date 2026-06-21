@@ -35,3 +35,4 @@ src-tauri/gen/
 cloudflare-worker/node_modules
 cloudflare-worker/.wrangler
 cloudflare-worker/package-lock.json
+cloudflare-worker/worker-configuration.d.ts

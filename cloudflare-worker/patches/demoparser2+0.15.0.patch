@@ -1,0 +1,11 @@
+diff --git a/node_modules/demoparser2/demoparser2.js b/node_modules/demoparser2/demoparser2.js
+index b842d69..25128f9 100644
+--- a/node_modules/demoparser2/demoparser2.js
++++ b/node_modules/demoparser2/demoparser2.js
+@@ -639,3 +639,6 @@ async function init(input) {
+ wasm_bindgen = Object.assign(init, { initSync }, __exports);
+ 
+ })();
++
++export default wasm_bindgen;
++export const { initSync: __initSync, parseEvent, parseEvents, listGameEvents, parseTicks, parseGrenades, parseHeader } = wasm_bindgen;

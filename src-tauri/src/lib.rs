@@ -1,5 +1,6 @@
 mod audio;
 mod connection;
+mod demo;
 mod identity;
 mod market;
 mod state;
@@ -9,7 +10,30 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use connection::{Cmd, ConnManager};
+use demo::{format_demo_share_message, DemoUploadResult};
 use serde::Serialize;
+
+#[tauri::command]
+async fn upload_demo(path: String) -> Result<DemoUploadResult, String> {
+    demo::upload_demo(path).await
+}
+
+#[tauri::command]
+async fn share_demo(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<DemoUploadResult, String> {
+    let result = demo::upload_demo(path).await?;
+    let message = format_demo_share_message(&result);
+    if let Some(conn) = state.conn.lock().unwrap().as_ref() {
+        conn.send(Cmd::SendChat {
+            target: "channel".into(),
+            message,
+            client: None,
+        });
+    }
+    Ok(result)
+}
 use tauri::{Emitter, Manager};
 
 struct AppState {
@@ -560,7 +584,9 @@ pub fn run() {
             market_price_single,
             market_item_kline,
             market_broad_index,
-            market_list
+            market_list,
+            upload_demo,
+            share_demo
         ])
         .on_window_event(|window, event| {
             // Disconnect cleanly before the window closes, so the server
