@@ -30,6 +30,63 @@ export async function marketCatalogue(
   return json.data as CatalogueItem[];
 }
 
+/// Fuzzy search over the catalogue. Beyond plain substring matching, it
+/// supports multi-keyword queries (space-separated tokens matched in any
+/// order, AND semantics — so "ak 红线" and "红线 ak" both hit "AK-47 | 红线")
+/// and a subsequence fallback for typo-tolerant English hash names. Results
+/// are ranked by relevance: exact > prefix > substring > multi-token > subseq.
+export function searchCatalogue(
+  catalogue: CatalogueItem[],
+  query: string,
+  opts?: { limit?: number; typeFilter?: string },
+): CatalogueItem[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const limit = opts?.limit ?? 120;
+  const typeFilter = opts?.typeFilter;
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const compact = q.replace(/\s+/g, "");
+
+  const scored: { item: CatalogueItem; score: number }[] = [];
+  for (const it of catalogue) {
+    if (typeFilter && it.type !== typeFilter) continue;
+    const name = it.name.toLowerCase();
+    const hash = it.marketHashName.toLowerCase();
+    const score = scoreCatalogueItem(name, hash, q, tokens, compact);
+    if (score > 0) scored.push({ item: it, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((s) => s.item);
+}
+
+function scoreCatalogueItem(
+  name: string,
+  hash: string,
+  q: string,
+  tokens: string[],
+  compact: string,
+): number {
+  if (name === q || hash === q) return 1000;
+  if (name.startsWith(q) || hash.startsWith(q)) return 800;
+  if (name.includes(q) || hash.includes(q)) return 600;
+  if (tokens.length > 1) {
+    const all = tokens.every((t) => name.includes(t) || hash.includes(t));
+    if (all) return 400;
+  }
+  if (isSubsequence(compact, name) || isSubsequence(compact, hash)) return 200;
+  return 0;
+}
+
+/// True when every char of `needle` appears in `haystack` in order (gaps ok).
+function isSubsequence(needle: string, haystack: string): boolean {
+  if (!needle) return false;
+  let i = 0;
+  for (let j = 0; j < haystack.length && i < needle.length; j++) {
+    if (haystack[j] === needle[i]) i++;
+  }
+  return i === needle.length;
+}
+
 export interface PlatformPrice {
   platform: string;
   sellPrice: number;

@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import {
   marketBroadIndex,
   marketCatalogue,
+  searchCatalogue,
   marketItemKline,
   marketList,
   marketPriceSingle,
@@ -176,14 +177,7 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
   // Search hits over the full catalogue, with optional type filter (capped).
   const searchHits = useMemo(() => {
     if (!q) return [];
-    return catalogue
-      .filter(
-        (it) =>
-          (it.name.toLowerCase().includes(q) ||
-            it.marketHashName.toLowerCase().includes(q)) &&
-          (!typeFilter || it.type === typeFilter),
-      )
-      .slice(0, 120);
+    return searchCatalogue(catalogue, q, { limit: 120, typeFilter });
   }, [q, catalogue, typeFilter]);
 
   return (

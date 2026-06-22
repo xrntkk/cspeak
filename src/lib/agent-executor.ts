@@ -1,6 +1,7 @@
 import {
   marketBroadIndex,
   marketCatalogue,
+  searchCatalogue,
   marketItemKline,
   marketList,
   marketPriceSingle,
@@ -87,17 +88,13 @@ async function runTool(
     }
 
     case "searchItems": {
-      const keyword = String(args.keyword ?? "").trim().toLowerCase();
+      const keyword = String(args.keyword ?? "").trim();
       if (!keyword) return { matches: [], total: 0 };
       const cat = await getCatalogue(accessToken);
-      const matches = cat
-        .filter(
-          (it) =>
-            it.name.toLowerCase().includes(keyword) ||
-            it.marketHashName.toLowerCase().includes(keyword),
-        )
-        .slice(0, 20)
-        .map((it) => ({ name: it.name, marketHashName: it.marketHashName }));
+      const matches = searchCatalogue(cat, keyword, { limit: 20 }).map((it) => ({
+        name: it.name,
+        marketHashName: it.marketHashName,
+      }));
       return { matches, total: cat.length };
     }
 

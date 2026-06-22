@@ -10,11 +10,11 @@ export const toolSchemas: Record<
     schema: { type: "object", properties: {}, required: [], additionalProperties: false },
   },
   searchItems: {
-    description: "按关键词搜索 CS2 饰品目录，返回 name 和 marketHashName。",
+    description: "按关键词模糊搜索 CS2 饰品目录，返回 name 和 marketHashName。支持多关键词任意顺序（如「ak 红线」）和拼写容错。",
     schema: {
       type: "object",
       properties: {
-        keyword: { type: "string", description: "饰品中文名或 market hash name 关键词" },
+        keyword: { type: "string", description: "饰品中文名或 market hash name 关键词，可空格分隔多个词" },
       },
       required: ["keyword"],
       additionalProperties: false,
