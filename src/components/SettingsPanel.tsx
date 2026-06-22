@@ -396,7 +396,8 @@ export function SettingsPanel({
             </div>
 
             <div className="border-t border-border pt-3">
-              <Row label="降噪模式">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs text-muted-foreground">降噪模式</span>
                 <div className="flex gap-1.5">
                   {(
                     [
@@ -423,7 +424,7 @@ export function SettingsPanel({
                     </button>
                   ))}
                 </div>
-              </Row>
+              </div>
               <p className="mt-2 text-xs text-muted-foreground">
                 AI 降噪(DeepFilterNet)对键盘、风扇、人声背景等噪声抑制更强,质量优于官方。
               </p>
