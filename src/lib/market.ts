@@ -9,6 +9,7 @@ export interface CatalogueItem {
   name: string;
   marketHashName: string;
   platformList: { name: string; itemId: string }[];
+  type?: string;
 }
 
 /// Full searchable item catalogue (name + marketHashName), served from the
@@ -46,6 +47,7 @@ export interface MarketListItem {
   imageUrl: string;
   rarityColor: string;
   exteriorName: string;
+  itemType: string;
   prices: PlatformPrice[];
 }
 
@@ -70,8 +72,16 @@ export interface MarketListPage {
   nextId: string;
 }
 
-export function marketList(accessToken?: string) {
-  return invoke<MarketListPage>("market_list", { accessToken: accessToken ?? null });
+export function marketList(
+  accessToken?: string,
+  nextId?: string,
+  sortType?: string,
+) {
+  return invoke<MarketListPage>("market_list", {
+    accessToken: accessToken ?? null,
+    nextId: nextId ?? null,
+    sortType: sortType ?? null,
+  });
 }
 
 export function marketPriceSingle(

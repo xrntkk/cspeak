@@ -3,6 +3,12 @@ main = "src/worker.js"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Custom domain (workers.dev is often blocked in CN; a proxied custom domain
+# on your own zone routes around it).
+routes = [
+  { pattern = "csspeak-market.xrntkk.top", custom_domain = true },
+]
+
 # Treat .wasm files as WebAssembly modules so we can import demoparser2's wasm.
 [[rules]]
 type = "CompiledWasm"
@@ -31,12 +37,6 @@ bucket_name = "csspeak-demo-reports"
 [[kv_namespaces]]
 binding = "DEMO_META"
 id = "29f7525e61db41b19afc7a601e1eea67"
-
-# Custom domain (workers.dev is often blocked in CN; a proxied custom domain
-# on your own zone routes around it).
-routes = [
-  { pattern = "csspeak-market.xrntkk.top", custom_domain = true },
-]
 
 # Daily cron: refresh the full item catalogue from SteamDT's base endpoint
 # (which is rate-limited to once/day per key — the Worker absorbs that limit

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChart, AreaSeries, CandlestickSeries } from "lightweight-charts";
 import { TrendingDown, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,38 @@ const KLINE_TYPES = [
   { label: "月K", value: "3" },
 ];
 
+// Coarse item categories (match the Worker's inferType buckets).
+const TYPE_FILTERS = [
+  { label: "全部", value: "" },
+  { label: "步枪", value: "Rifle" },
+  { label: "狙击", value: "SniperRifle" },
+  { label: "手枪", value: "Pistol" },
+  { label: "微冲", value: "SMG" },
+  { label: "重型", value: "Heavy" },
+  { label: "匕首", value: "Knife" },
+  { label: "手套", value: "Gloves" },
+  { label: "印花", value: "Sticker" },
+  { label: "涂鸦", value: "Graffiti" },
+  { label: "挂件", value: "Charm" },
+  { label: "探员", value: "Agent" },
+  { label: "音乐盒", value: "MusicKit" },
+  { label: "容器", value: "Container" },
+];
+
+type SortMode = "default" | "price-asc" | "price-desc";
+
+const SORT_MODES: { label: string; value: SortMode }[] = [
+  { label: "默认", value: "default" },
+  { label: "价格 ↑", value: "price-asc" },
+  { label: "价格 ↓", value: "price-desc" },
+];
+
+/// Lowest valid sell price across platforms, or null when none.
+function lowestPrice(prices: PlatformPrice[]): number | null {
+  const valid = prices.filter((p) => p.sellPrice > 0).map((p) => p.sellPrice);
+  return valid.length ? Math.min(...valid) : null;
+}
+
 const CAT_KEY = "csspeak.market.catalogue";
 const CAT_TS_KEY = "csspeak.market.catalogue.ts";
 const CAT_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
@@ -40,22 +72,49 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
   const [index, setIndex] = useState<BroadIndex | null>(null);
   const [hot, setHot] = useState<MarketListItem[]>([]);
   const [hotLoading, setHotLoading] = useState(true);
+  const [nextId, setNextId] = useState<string>("");
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
   const [catalogue, setCatalogue] = useState<CatalogueItem[]>([]);
   const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("default");
   const [selected, setSelected] = useState<DetailTarget | null>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   // Big-board index: fetch once.
   useEffect(() => {
     marketBroadIndex(accessToken).then(setIndex).catch(() => {});
   }, [accessToken]);
 
-  // Hot list (rich cards with prices/images) as the default view.
+  // First page of the hot list (rich cards with prices/images).
   useEffect(() => {
     marketList(accessToken)
-      .then((page) => setHot(page.list))
+      .then((page) => {
+        setHot(page.list);
+        setNextId(page.nextId);
+        if (!page.nextId || page.list.length === 0) setExhausted(true);
+      })
       .catch(() => {})
       .finally(() => setHotLoading(false));
-  }, []);
+  }, [accessToken]);
+
+  // Load the next page via the nextId cursor and append, de-duping by itemId.
+  const loadMore = useCallback(() => {
+    if (loadingMore || exhausted || !nextId) return;
+    setLoadingMore(true);
+    marketList(accessToken, nextId)
+      .then((page) => {
+        setHot((prev) => {
+          const seen = new Set(prev.map((it) => it.itemId));
+          return [...prev, ...page.list.filter((it) => !seen.has(it.itemId))];
+        });
+        setNextId(page.nextId);
+        if (!page.nextId || page.list.length === 0) setExhausted(true);
+      })
+      .catch(() => setExhausted(true))
+      .finally(() => setLoadingMore(false));
+  }, [accessToken, nextId, loadingMore, exhausted]);
 
   // Full catalogue from the Worker (cached 24h) — loaded for search.
   useEffect(() => {
@@ -85,17 +144,47 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
 
   const q = query.trim().toLowerCase();
 
-  // Search hits over the full catalogue (capped for rendering).
+  // Infinite scroll: observe a sentinel near the bottom of the hot list. Only
+  // active in the default (non-search) view.
+  useEffect(() => {
+    if (q || !sentinelRef.current) return;
+    const el = sentinelRef.current;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) loadMore();
+      },
+      { rootMargin: "400px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [q, loadMore]);
+
+  // Hot list with client-side type filter + price sort applied.
+  const hotView = useMemo(() => {
+    let list = hot;
+    if (typeFilter) list = list.filter((it) => it.itemType === typeFilter);
+    if (sortMode !== "default") {
+      list = [...list].sort((a, b) => {
+        const pa = lowestPrice(a.prices) ?? Infinity;
+        const pb = lowestPrice(b.prices) ?? Infinity;
+        return sortMode === "price-asc" ? pa - pb : pb - pa;
+      });
+    }
+    return list;
+  }, [hot, typeFilter, sortMode]);
+
+  // Search hits over the full catalogue, with optional type filter (capped).
   const searchHits = useMemo(() => {
     if (!q) return [];
     return catalogue
       .filter(
         (it) =>
-          it.name.toLowerCase().includes(q) ||
-          it.marketHashName.toLowerCase().includes(q),
+          (it.name.toLowerCase().includes(q) ||
+            it.marketHashName.toLowerCase().includes(q)) &&
+          (!typeFilter || it.type === typeFilter),
       )
-      .slice(0, 60);
-  }, [q, catalogue]);
+      .slice(0, 120);
+  }, [q, catalogue, typeFilter]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -112,6 +201,42 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
           }
           className="h-9 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-ring"
         />
+        {!q && (
+          <div className="flex gap-1">
+            {SORT_MODES.map((m) => (
+              <button
+                key={m.value}
+                onClick={() => setSortMode(m.value)}
+                className={cn(
+                  "rounded-md border border-border px-2 py-1.5 text-xs transition-colors",
+                  sortMode === m.value
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-accent",
+                )}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Category filter chips — apply to both search and hot list. */}
+      <div className="flex flex-wrap gap-1">
+        {TYPE_FILTERS.map((t) => (
+          <button
+            key={t.value}
+            onClick={() => setTypeFilter(t.value)}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-xs transition-colors",
+              typeFilter === t.value
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border text-muted-foreground hover:bg-accent",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
       {q ? (
@@ -145,13 +270,15 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
       ) : hotLoading ? (
         <div className="text-sm text-muted-foreground">加载中…</div>
       ) : (
-        // Default hot list.
+        // Default hot list with infinite scroll.
         <>
           <div className="text-xs font-medium uppercase text-muted-foreground">
-            热门饰品
+            {typeFilter
+              ? `${TYPE_FILTERS.find((t) => t.value === typeFilter)?.label} · ${hotView.length} 件`
+              : `热门饰品 · 已加载 ${hot.length} 件`}
           </div>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
-            {hot.map((it) => (
+            {hotView.map((it) => (
               <ItemCard
                 key={it.itemId}
                 item={it}
@@ -167,6 +294,14 @@ export function MarketPanel({ dark, accessToken }: { dark: boolean; accessToken?
                 }
               />
             ))}
+          </div>
+          <div ref={sentinelRef} className="h-1" />
+          <div className="py-2 text-center text-xs text-muted-foreground">
+            {loadingMore
+              ? "加载更多…"
+              : exhausted
+                ? "已到底部"
+                : ""}
           </div>
         </>
       )}

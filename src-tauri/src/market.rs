@@ -132,6 +132,7 @@ pub struct MarketListItem {
     pub image_url: String,
     pub rarity_color: String,
     pub exterior_name: String,
+    pub item_type: String,
     pub prices: Vec<PlatformPrice>,
 }
 
@@ -144,14 +145,23 @@ pub struct MarketListPage {
 
 pub async fn market_list(
     access_token: Option<&str>,
+    next_id: Option<&str>,
+    sort_type: Option<&str>,
 ) -> anyhow::Result<MarketListPage> {
-    let url = build_url("/hotlist", &[]);
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if let Some(n) = next_id.filter(|s| !s.is_empty()) {
+        pairs.push(("nextId", n));
+    }
+    if let Some(s) = sort_type.filter(|s| !s.is_empty()) {
+        pairs.push(("sortType", s));
+    }
+    let url = build_url("/hotlist", &pairs);
     let resp = reqwest::Client::new()
         .get(&url)
         .header("Authorization", bearer(access_token))
         .send().await?.json::<serde_json::Value>().await?;
 
-    let next = resp.pointer("/nextId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let next = resp.pointer("/data/nextId").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut out = Vec::new();
     if let Some(arr) = resp.pointer("/data/list").and_then(|v| v.as_array()) {
         for it in arr {
@@ -166,6 +176,7 @@ pub async fn market_list(
                 image_url: s(it, "imageUrl"),
                 rarity_color: s_or(it, "rarityColor", "#888"),
                 exterior_name: s(it, "exteriorName"),
+                item_type: normalize_type(&s(it, "itemType")),
                 prices,
             });
         }
@@ -180,11 +191,37 @@ fn s_or(v: &serde_json::Value, key: &str, fallback: &str) -> String {
     v.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| fallback.to_string())
 }
 
-fn parse_prices(data: Option<&serde_json::Value>) -> Vec<PlatformPrice> {
-    let Some(arr) = data.and_then(|d| d.as_array()) else { return Vec::new(); };
-    arr.iter().map(parse_price).collect()
+/// Normalise the hotlist's itemType (e.g. "CSGO_Type_SniperRifle", "Type_Hands")
+/// to the short buckets the /base catalogue uses, so the client filters on one
+/// vocabulary regardless of source.
+fn normalize_type(raw: &str) -> String {
+    match raw {
+        "Type_Hands" => "Gloves".to_string(),
+        other => other
+            .strip_prefix("CSGO_Type_")
+            .unwrap_or(other)
+            .to_string(),
+    }
 }
 
+/// price/single returns full fields: platform / sellPrice / sellCount /
+/// biddingPrice / biddingCount / updateTime.
+fn parse_prices(data: Option<&serde_json::Value>) -> Vec<PlatformPrice> {
+    let Some(arr) = data.and_then(|d| d.as_array()) else { return Vec::new(); };
+    arr.iter()
+        .map(|p| PlatformPrice {
+            platform: s(p, "platform"),
+            sell_price: p.get("sellPrice").and_then(num).unwrap_or(0.0),
+            sell_count: p.get("sellCount").and_then(|v| v.as_i64()).unwrap_or(0),
+            bidding_price: p.get("biddingPrice").and_then(num).unwrap_or(0.0),
+            bidding_count: p.get("biddingCount").and_then(|v| v.as_i64()).unwrap_or(0),
+            update_time: p.get("updateTime").and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+        .collect()
+}
+
+/// hotlist's sellingPriceList uses a leaner shape: platformName / price /
+/// lastUpdate (no counts).
 fn parse_price(p: &serde_json::Value) -> PlatformPrice {
     PlatformPrice {
         platform: s(p, "platformName"),

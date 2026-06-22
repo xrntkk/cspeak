@@ -529,8 +529,10 @@ async fn market_broad_index(
 #[tauri::command]
 async fn market_list(
     access_token: Option<String>,
+    next_id: Option<String>,
+    sort_type: Option<String>,
 ) -> Result<market::MarketListPage, String> {
-    market::market_list(access_token.as_deref())
+    market::market_list(access_token.as_deref(), next_id.as_deref(), sort_type.as_deref())
         .await
         .map_err(|e| e.to_string())
 }

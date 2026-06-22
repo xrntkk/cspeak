@@ -426,6 +426,51 @@ function describeStreamError(error) {
 // Catalogue cache (unchanged)
 // ---------------------------------------------------------------------------
 
+// Infer a coarse item category from the English market hash name. The base
+// endpoint has no type field, so we classify once at refresh time and store it
+// so every client (and the agent's searchItems) gets typed data for free.
+// Categories mirror SteamDT's itemType buckets seen on the hotlist endpoint.
+const KNIFE_NAMES = [
+  "Knife", "Bayonet", "Karambit", "Daggers", "Talon", "Stiletto", "Ursus",
+  "Navaja", "Nomad", "Skeleton", "Survival", "Paracord", "Classic", "Bowie",
+  "Falchion", "Gut", "Huntsman", "Shadow Daggers", "Butterfly", "Flip", "Kukri",
+];
+const GLOVE_NAMES = ["Gloves", "Hand Wraps", "Wraps"];
+const PISTOLS = [
+  "Glock-18", "USP-S", "P2000", "P250", "Five-SeveN", "Tec-9", "CZ75-Auto",
+  "Desert Eagle", "Dual Berettas", "R8 Revolver", "Zeus x27",
+];
+const SMGS = ["MP9", "MAC-10", "MP7", "MP5-SD", "UMP-45", "P90", "PP-Bizon"];
+const SNIPERS = ["AWP", "SSG 08", "SCAR-20", "G3SG1"];
+const HEAVY = ["Nova", "XM1014", "Sawed-Off", "MAG-7", "M249", "Negev"];
+
+function inferType(name, marketHashName) {
+  const h = marketHashName || "";
+  // Non-weapon categories are identified by the full prefix.
+  if (h.startsWith("Sticker")) return "Sticker";
+  if (h.startsWith("Patch")) return "Patch";
+  if (h.startsWith("Sealed Graffiti") || h.startsWith("Graffiti")) return "Graffiti";
+  if (h.startsWith("Charm") || h.includes("Charm |")) return "Charm";
+  if (h.includes("Music Kit")) return "MusicKit";
+  if (/Key$|Coin$|Medal$|Trophy$|Pass$|Pin$| Case$| Capsule| Package/.test(h)) return "Container";
+  if (h.includes("Agent") || h.startsWith("Sir ") || h.startsWith("Officer")) return "Agent";
+  // Strip StatTrak™/Souvenir/★ prefixes so the weapon name classifies cleanly.
+  const star = h.startsWith("★");
+  let core = h.replace(/^★\s*/, "").replace(/^StatTrak™\s*/, "").replace(/^Souvenir\s*/, "");
+  const weapon = core.split(" | ")[0].trim();
+  if (star) {
+    return GLOVE_NAMES.some((g) => weapon.includes(g)) ? "Gloves" : "Knife";
+  }
+  if (KNIFE_NAMES.some((k) => weapon.includes(k))) return "Knife";
+  if (GLOVE_NAMES.some((g) => weapon.includes(g))) return "Gloves";
+  if (SNIPERS.includes(weapon)) return "SniperRifle";
+  if (PISTOLS.includes(weapon)) return "Pistol";
+  if (SMGS.includes(weapon)) return "SMG";
+  if (HEAVY.includes(weapon)) return "Heavy";
+  if (/^(AK-47|M4A4|M4A1-S|AUG|SG 553|FAMAS|Galil AR)$/.test(weapon)) return "Rifle";
+  return "Other";
+}
+
 async function refreshCatalogue(env) {
   const resp = await fetch(`${BASE}/open/cs2/v1/base`, {
     headers: { Authorization: `Bearer ${env.STEAMDT_KEY}` },
@@ -440,6 +485,7 @@ async function refreshCatalogue(env) {
     name: it.name,
     marketHashName: it.marketHashName,
     platformList: it.platformList,
+    type: inferType(it.name, it.marketHashName),
   }));
   await env.MARKET_CACHE.put(KV_KEY, JSON.stringify(items));
   await env.MARKET_CACHE.put(KV_TS_KEY, String(Date.now()));
@@ -512,6 +558,27 @@ export default {
       } catch (e) {
         return json({ success: false, error: String(e) }, 500);
       }
+    }
+
+    // GET /reclassify?secret=...  →  add/refresh the inferred `type` field on the
+    // cached catalogue WITHOUT calling the once/day base endpoint. Useful after
+    // changing inferType or to backfill an older cache that predates typing.
+    if (url.pathname === "/reclassify") {
+      if (url.searchParams.get("secret") !== env.REFRESH_SECRET) {
+        return json({ success: false, error: "forbidden" }, 403);
+      }
+      const cached = await env.MARKET_CACHE.get(KV_KEY);
+      if (!cached) return json({ success: false, error: "catalogue not ready" }, 503);
+      const items = JSON.parse(cached).map((it) => ({
+        name: it.name,
+        marketHashName: it.marketHashName,
+        platformList: it.platformList,
+        type: inferType(it.name, it.marketHashName),
+      }));
+      await env.MARKET_CACHE.put(KV_KEY, JSON.stringify(items));
+      const counts = {};
+      for (const it of items) counts[it.type] = (counts[it.type] || 0) + 1;
+      return json({ success: true, count: items.length, counts });
     }
 
     // ---- Demo replay parsing endpoints ----
@@ -629,15 +696,21 @@ export default {
       return proxyPost(env, `${BASE}/open/cs2/item/v1/kline`, body, ttl(TTL.kline));
     }
 
-    // GET /hotlist  →  public web skin/market/v1/list (10 min cache, open)
+    // GET /hotlist?nextId=&sortType=  →  public web skin/market/v1/list
+    // (10 min cache, open). pageSize is required upstream but the endpoint
+    // ignores its value and always returns 20 items; paging is cursor-based
+    // via nextId. The cache key includes nextId so each page caches separately.
     if (url.pathname === "/hotlist") {
-      const body = JSON.stringify({ sortType: 1, pageSize: 100 });
-      const key = new Request(`https://hotlist`, { method: "GET" });
-      // Build a deduplicated cache key from the body.
-      const cacheUrl = new URL(request.url);
-      cacheUrl.search = ""; // normalise
-      const cacheReq = new Request(cacheUrl, { method: "GET" });
-      let cached = await caches.default.match(cacheReq);
+      const nextId = url.searchParams.get("nextId") || "";
+      const sortType = Number(url.searchParams.get("sortType")) || 1;
+      const payload = { sortType, pageSize: 20 };
+      if (nextId) payload.nextId = nextId;
+      const body = JSON.stringify(payload);
+
+      // Cache key is the normalised request URL (path + query), so distinct
+      // pages/sorts don't collide.
+      const cacheReq = new Request(request.url, { method: "GET" });
+      const cached = await caches.default.match(cacheReq);
       if (cached) return cached;
 
       const resp = await fetch(`${WEB_BASE}/skin/market/v1/list`, {
