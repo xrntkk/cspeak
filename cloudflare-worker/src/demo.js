@@ -2,8 +2,15 @@
 // This module parses CS2 .dem files into a JSON report and stores it in R2/KV.
 
 import "./demoparser-polyfill.js";
-import wasm_bindgen, { parseEvent, parseHeader } from "demoparser2";
+import wasm_bindgen, { parseEvent, parseEvents, parseTicks, parseHeader } from "demoparser2";
 import wasmModule from "../node_modules/demoparser2/demoparser2_bg.wasm";
+import {
+  computePlayerStats,
+  computeDerivedStats,
+  computeRating2,
+  computeRating3,
+  getEquipmentValue,
+} from "./stats.js";
 
 let initialized = false;
 
@@ -23,6 +30,142 @@ function isValidDemoHeader(bytes) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Event / tick parsing
+// ---------------------------------------------------------------------------
+
+const EVENTS_TO_PARSE = [
+  "player_death",
+  "player_hurt",
+  "round_start",
+  "round_freeze_end",
+  "round_end",
+  "bomb_planted",
+  "bomb_defused",
+  "bomb_exploded",
+  "player_blind",
+  "weapon_fire",
+  "item_pickup",
+  "player_spawn",
+];
+
+const TICK_PROPS = [
+  "player_name",
+  "player_steamid",
+  "team_num",
+  "is_alive",
+  "active_weapon_name",
+  "inventory",
+  "armor_value",
+  "has_helmet",
+  "has_defuser",
+  "balance",
+  "cash_spent_this_round",
+  "equipment_value_this_round",
+  "total_cash_spent",
+  "num_player_alive_ct",
+  "num_player_alive_t",
+  "is_bomb_planted",
+  "total_rounds_played",
+];
+
+function parseAllEvents(bytes) {
+  const parsed = parseEvents(bytes, EVENTS_TO_PARSE) ?? {};
+  const events = {};
+  for (const name of EVENTS_TO_PARSE) {
+    events[name] = Array.isArray(parsed[name]) ? parsed[name] : (parseEvent(bytes, name) ?? []);
+  }
+  return events;
+}
+
+function getRoundFreezeTicks(freezeEndEvents) {
+  return freezeEndEvents.map((e) => e.tick ?? 0).filter((t) => t > 0);
+}
+
+function parseFreezeSnapshots(bytes, freezeEndEvents) {
+  const ticks = getRoundFreezeTicks(freezeEndEvents);
+  if (ticks.length === 0) return [];
+  const wantedTicks = new Int32Array(ticks);
+  try {
+    const data = parseTicks(bytes, TICK_PROPS, wantedTicks, false);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.warn("parseTicks failed:", e);
+    return [];
+  }
+}
+
+function buildFreezeSnapshotMap(snapshots, freezeEndEvents) {
+  const byTick = new Map();
+  for (const s of snapshots) {
+    const tick = s.tick;
+    if (!tick) continue;
+    if (!byTick.has(tick)) byTick.set(tick, new Map());
+    const name = s.player_name;
+    if (name) byTick.get(tick).set(name, s);
+  }
+
+  const map = new Map();
+  for (const evt of freezeEndEvents) {
+    const round = evt.round ?? 0;
+    const tick = evt.tick ?? 0;
+    let snapshot = byTick.get(tick);
+    if (!snapshot && tick > 0) {
+      const ticks = Array.from(byTick.keys()).sort((a, b) => a - b);
+      const nearest = ticks.find((t) => t >= tick) ?? ticks.findLast((t) => t < tick);
+      if (nearest) snapshot = byTick.get(nearest);
+    }
+    if (snapshot) map.set(round, snapshot);
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Round context
+// ---------------------------------------------------------------------------
+
+function buildRounds(events) {
+  const roundEnds = events.round_end ?? [];
+  const roundStarts = events.round_start ?? [];
+  const freezeEnds = events.round_freeze_end ?? [];
+
+  const rounds = roundEnds.map((r, idx) => ({
+    round: r.round ?? idx + 1,
+    winner: r.winner === 2 ? "ct" : r.winner === 3 ? "t" : "unknown",
+    reason: r.reason ?? "unknown",
+    scoreCt: r.ct_score ?? 0,
+    scoreT: r.t_score ?? 0,
+    tick: r.tick ?? 0,
+    startTick: roundStarts[idx]?.tick ?? 0,
+    freezeEndTick: freezeEnds[idx]?.tick ?? 0,
+    aliveCt: [],
+    aliveT: [],
+    bombPlanted: false,
+    plantTick: null,
+    defuseTick: null,
+  }));
+
+  const byRound = new Map(rounds.map((r) => [r.round, r]));
+
+  for (const e of events.bomb_planted ?? []) {
+    const r = byRound.get(e.round ?? 0);
+    if (r) {
+      r.bombPlanted = true;
+      r.plantTick = e.tick ?? null;
+    }
+  }
+  for (const e of events.bomb_defused ?? []) {
+    const r = byRound.get(e.round ?? 0);
+    if (r) r.defuseTick = e.tick ?? null;
+  }
+
+  return rounds;
+}
+
+// ---------------------------------------------------------------------------
+// Report generation
+// ---------------------------------------------------------------------------
+
 /**
  * Parse a CS2 demo byte array into a structured report object.
  * @param {Uint8Array} bytes
@@ -37,85 +180,78 @@ export async function parseDemoToReport(bytes) {
 
   const header = parseHeader(bytes);
   const mapName = header?.map_name ?? "unknown";
-  const tickRate = 64; // CS2 default, can be read from server info if needed
+  const tickRate = 64; // CS2 default
 
-  // Events we care about for the MVP report.
-  const roundEnds = parseEvent(bytes, "round_end") ?? [];
-  const deaths = parseEvent(bytes, "player_death") ?? [];
+  const events = parseAllEvents(bytes);
+  const rounds = buildRounds(events);
+  const freezeSnapshots = buildFreezeSnapshotMap(
+    parseFreezeSnapshots(bytes, events.round_freeze_end ?? []),
+    events.round_freeze_end ?? []
+  );
 
-  // Final score from the last round_end event.
-  const finalRound = roundEnds[roundEnds.length - 1];
-  const scoreCt = finalRound?.ct_score ?? 0;
-  const scoreT = finalRound?.t_score ?? 0;
+  const playerStats = computePlayerStats(events, rounds, freezeSnapshots);
 
-  // Build player stats from player_death events.
-  const playerStats = new Map();
-
-  function ensurePlayer(name, teamHint) {
-    if (!playerStats.has(name)) {
-      playerStats.set(name, {
-        name,
-        team: teamHint ?? null,
-        kills: 0,
-        deaths: 0,
-        assists: 0,
-        headshots: 0,
-      });
-    }
-    return playerStats.get(name);
-  }
-
+  const deaths = events.player_death ?? [];
   const killFeed = [];
   const maxKillFeed = 200;
-
   for (const d of deaths) {
-    const roundNum = d.round ?? 0;
-    const attackerName = d.attacker_name;
-    const victimName = d.user_name;
-    const assisterName = d.assister_name;
-
-    if (attackerName) {
-      const attacker = ensurePlayer(attackerName, d.attacker_team);
-      attacker.kills += 1;
-      attacker.team = d.attacker_team ?? attacker.team;
-      if (d.headshot) attacker.headshots += 1;
-    }
-
-    if (victimName) {
-      const victim = ensurePlayer(victimName, d.user_team);
-      victim.deaths += 1;
-      victim.team = d.user_team ?? victim.team;
-    }
-
-    if (assisterName) {
-      const assister = ensurePlayer(assisterName, d.assister_team);
-      assister.assists += 1;
-      assister.team = d.assister_team ?? assister.team;
-    }
-
-    if (killFeed.length < maxKillFeed) {
-      killFeed.push({
-        tick: d.tick ?? 0,
-        round: roundNum,
-        attacker: attackerName ?? null,
-        victim: victimName ?? null,
-        weapon: d.weapon ?? null,
-        headshot: !!d.headshot,
-        attackerPos: d.attacker_x != null ? { x: d.attacker_x, y: d.attacker_y, z: d.attacker_z } : null,
-        victimPos: d.user_x != null ? { x: d.user_x, y: d.user_y, z: d.user_z } : null,
-      });
-    }
+    if (killFeed.length >= maxKillFeed) break;
+    killFeed.push({
+      tick: d.tick ?? 0,
+      round: d.round ?? 0,
+      attacker: d.attacker_name ?? null,
+      victim: d.user_name ?? null,
+      weapon: d.weapon ?? null,
+      headshot: !!d.headshot,
+      attackerPos: d.attacker_x != null ? { x: d.attacker_x, y: d.attacker_y, z: d.attacker_z } : null,
+      victimPos: d.user_x != null ? { x: d.user_x, y: d.user_y, z: d.user_z } : null,
+    });
   }
 
-  // Round summary.
-  const rounds = roundEnds.map((r, idx) => ({
-    round: idx + 1,
-    winner: r.winner === 2 ? "ct" : r.winner === 3 ? "t" : "unknown",
-    reason: r.reason ?? "unknown",
-    scoreCt: r.ct_score ?? 0,
-    scoreT: r.t_score ?? 0,
-    tick: r.tick ?? 0,
-  }));
+  const players = [];
+  for (const p of playerStats.values()) {
+    const derived = computeDerivedStats(p);
+    const r2 = computeRating2(derived);
+    const r3 = computeRating3(derived);
+    players.push({
+      name: p.name,
+      team: p.team,
+      kills: p.kills,
+      deaths: p.deaths,
+      assists: p.assists,
+      headshots: p.headshots,
+      damage: p.damage,
+      damageTaken: p.damageTaken,
+      roundsPlayed: p.roundsPlayed,
+      kastRounds: p.kastRounds.size,
+      kast: Number(derived.kast.toFixed(3)),
+      adr: Number(derived.adr.toFixed(2)),
+      kpr: Number(derived.kpr.toFixed(3)),
+      dpr: Number(derived.dpr.toFixed(3)),
+      apr: Number(derived.apr.toFixed(3)),
+      hsp: Number(derived.hsp.toFixed(3)),
+      openingKills: p.openingKills,
+      openingDeaths: p.openingDeaths,
+      tradeKills: p.tradeKills,
+      tradedDeaths: p.tradedDeaths,
+      multiKillRounds: p.multiKillRounds,
+      flashAssists: p.flashAssists,
+      clutchWins: p.clutchWins,
+      rating2: Number(r2.rating.toFixed(3)),
+      impact: Number(r2.impact.toFixed(3)),
+      rating3: Number(r3.rating.toFixed(3)),
+      subRatings: {
+        kills: Number(r3.subRatings.kills.toFixed(3)),
+        damage: Number(r3.subRatings.damage.toFixed(3)),
+        survival: Number(r3.subRatings.survival.toFixed(3)),
+        kast: Number(r3.subRatings.kast.toFixed(3)),
+        multiKills: Number(r3.subRatings.multiKills.toFixed(3)),
+        roundSwing: Number(r3.subRatings.roundSwing.toFixed(3)),
+      },
+    });
+  }
+
+  players.sort((a, b) => b.kills - a.kills);
 
   return {
     header: {
@@ -125,14 +261,26 @@ export async function parseDemoToReport(bytes) {
       durationSeconds: (header?.tick_count ?? 0) / tickRate,
       demoVersion: header?.demo_version ?? null,
     },
-    finalScore: { ct: scoreCt, t: scoreT },
-    totalRounds: roundEnds.length,
-    players: Array.from(playerStats.values()).sort((a, b) => b.kills - a.kills),
-    rounds,
+    finalScore: { ct: rounds[rounds.length - 1]?.scoreCt ?? 0, t: rounds[rounds.length - 1]?.scoreT ?? 0 },
+    totalRounds: rounds.length,
+    players,
+    rounds: rounds.map((r) => ({
+      round: r.round,
+      winner: r.winner,
+      reason: r.reason,
+      scoreCt: r.scoreCt,
+      scoreT: r.scoreT,
+      tick: r.tick,
+      bombPlanted: r.bombPlanted,
+    })),
     killFeed,
     generatedAt: Date.now(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Storage helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 /**
  * Store a report in R2 (preferred) or KV (fallback) and its metadata in KV.
@@ -210,7 +358,7 @@ export async function loadReportMeta(reportId, env) {
 }
 
 // ---------------------------------------------------------------------------
-// Multipart upload helpers for large .dem files.
+// Multipart upload helpers (unchanged)
 // ---------------------------------------------------------------------------
 
 const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per part

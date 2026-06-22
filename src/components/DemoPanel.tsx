@@ -10,7 +10,7 @@ import {
   teamName,
   worldToMapPixel,
 } from "@/lib/demo";
-import { BarChart3, Crosshair, Skull, Target, Users } from "lucide-react";
+import { BarChart3, Crosshair, Skull, Target, Users, Zap, TrendingUp } from "lucide-react";
 
 type Tab = "overview" | "scoreboard" | "rounds" | "heatmap";
 
@@ -96,6 +96,7 @@ function Overview({ report }: { report: DemoReport }) {
   const totalKills = report.killFeed.length;
   const headshots = report.killFeed.filter((k) => k.headshot).length;
   const topKiller = report.players[0];
+  const topRated = report.players.reduce((a, b) => (b.rating2 > a.rating2 ? b : a), report.players[0]);
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -107,6 +108,10 @@ function Overview({ report }: { report: DemoReport }) {
         label="最高击杀"
         value={topKiller ? `${topKiller.name} (${topKiller.kills})` : "-"}
       />
+      <StatCard icon={Zap} label="最高 Rating 2.0" value={topRated ? `${topRated.name} (${topRated.rating2.toFixed(2)})` : "-"} />
+      <StatCard icon={TrendingUp} label="最高 Rating 3.0" value={topRated ? `${topRated.name} (${topRated.rating3.toFixed(2)})` : "-"} />
+      <StatCard icon={Target} label="平均 Rating 2.0" value={report.players.length ? (report.players.reduce((s, p) => s + p.rating2, 0) / report.players.length).toFixed(2) : "-"} />
+      <StatCard icon={TrendingUp} label="平均 Rating 3.0" value={report.players.length ? (report.players.reduce((s, p) => s + p.rating3, 0) / report.players.length).toFixed(2) : "-"} />
     </div>
   );
 }
@@ -142,7 +147,10 @@ function Scoreboard({ report }: { report: DemoReport }) {
             <th className="px-3 py-2 text-right">K</th>
             <th className="px-3 py-2 text-right">D</th>
             <th className="px-3 py-2 text-right">A</th>
-            <th className="px-3 py-2 text-right">爆头</th>
+            <th className="px-3 py-2 text-right">ADR</th>
+            <th className="px-3 py-2 text-right">KAST</th>
+            <th className="px-3 py-2 text-right">Rating 2.0</th>
+            <th className="px-3 py-2 text-right">Rating 3.0</th>
             <th className="px-3 py-2 text-right">K/D</th>
           </tr>
         </thead>
@@ -154,7 +162,15 @@ function Scoreboard({ report }: { report: DemoReport }) {
               <td className="px-3 py-2 text-right">{p.kills}</td>
               <td className="px-3 py-2 text-right">{p.deaths}</td>
               <td className="px-3 py-2 text-right">{p.assists}</td>
-              <td className="px-3 py-2 text-right">{p.headshots}</td>
+              <td className="px-3 py-2 text-right">{p.adr}</td>
+              <td className="px-3 py-2 text-right">{Math.round(p.kast * 100)}%</td>
+              <td className="px-3 py-2 text-right">{p.rating2.toFixed(2)}</td>
+              <td
+                className="px-3 py-2 text-right font-medium"
+                title={`Rating 3.0 近似子评分：Kills ${p.subRatings.kills.toFixed(2)}, Damage ${p.subRatings.damage.toFixed(2)}, Survival ${p.subRatings.survival.toFixed(2)}, KAST ${p.subRatings.kast.toFixed(2)}, Multi-Kills ${p.subRatings.multiKills.toFixed(2)}, Round Swing ${p.subRatings.roundSwing.toFixed(2)}`}
+              >
+                {p.rating3.toFixed(2)}
+              </td>
               <td className="px-3 py-2 text-right">
                 {(p.deaths > 0 ? p.kills / p.deaths : p.kills).toFixed(2)}
               </td>

@@ -59,6 +59,34 @@ export interface DemoReport {
     deaths: number;
     assists: number;
     headshots: number;
+    damage: number;
+    damageTaken: number;
+    roundsPlayed: number;
+    kastRounds: number;
+    kast: number;
+    adr: number;
+    kpr: number;
+    dpr: number;
+    apr: number;
+    hsp: number;
+    openingKills: number;
+    openingDeaths: number;
+    tradeKills: number;
+    tradedDeaths: number;
+    multiKillRounds: number[];
+    flashAssists: number;
+    clutchWins: number[];
+    rating2: number;
+    impact: number;
+    rating3: number;
+    subRatings: {
+      kills: number;
+      damage: number;
+      survival: number;
+      kast: number;
+      multiKills: number;
+      roundSwing: number;
+    };
   }>;
   rounds: Array<{
     round: number;
@@ -67,6 +95,7 @@ export interface DemoReport {
     scoreCt: number;
     scoreT: number;
     tick: number;
+    bombPlanted: boolean;
   }>;
   killFeed: Array<{
     tick: number;
@@ -97,4 +126,31 @@ export function teamName(team: string | null): string {
   if (team === "ct") return "CT";
   if (team === "t") return "T";
   return team ?? "未知";
+}
+
+export function kastPercent(player: DemoReport["players"][number]): string {
+  return `${Math.round(player.kast * 100)}%`;
+}
+
+export function adr(player: DemoReport["players"][number]): number {
+  return player.adr;
+}
+
+export function rating2(player: DemoReport["players"][number]): number {
+  return player.rating2;
+}
+
+export function rating3(player: DemoReport["players"][number]): number {
+  return player.rating3;
+}
+
+export function multiKillLabel(player: DemoReport["players"][number]): string {
+  const [one, two, three, four, five] = player.multiKillRounds.slice(1, 6);
+  const parts: string[] = [];
+  if (five) parts.push(`${five}×5K`);
+  if (four) parts.push(`${four}×4K`);
+  if (three) parts.push(`${three}×3K`);
+  if (two) parts.push(`${two}×2K`);
+  if (parts.length === 0) return one ? `${one}×1K` : "-";
+  return parts.join(" ");
 }
